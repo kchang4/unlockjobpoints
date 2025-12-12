@@ -525,28 +525,43 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
     if e.id == 0x0061 then
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
         
-        -- Job levels are stored starting at offset 0x14 (1 byte per job, jobs 0-22)
-        -- Format: job 0 (none) at 0x14, WAR at 0x15, MNK at 0x16, etc.
-        -- Reference: https://github.com/Windower/Lua/wiki/Incoming-Packet-0x061
-        local jobLevelOffset = 0x14;
-        local modified = 0;
+        printMsg(string.format('*** Intercepted Char Stats packet (0x061) size=%d ***', e.size));
         
-        for jobId = 1, 22 do
-            local levelOffset = jobLevelOffset + jobId;
-            local currentLevel = ptr[levelOffset];
-            
-            -- Only modify if level is less than 99
-            if currentLevel < 99 and currentLevel > 0 then
-                ptr[levelOffset] = 99;  -- Set to 99 for JP menu
-                modified = modified + 1;
-                if state.debug then
-                    debugPrint(string.format('  Job %d level: %d -> 99', jobId, currentLevel));
+        -- Dump first 64 bytes to see structure
+        if state.debug then
+            local hexDump = '';
+            for i = 0, math.min(63, e.size - 1) do
+                hexDump = hexDump .. string.format('%02X ', ptr[i]);
+                if (i + 1) % 16 == 0 then
+                    debugPrint(string.format('  0x%02X: %s', i - 15, hexDump));
+                    hexDump = '';
                 end
             end
         end
         
-        if modified > 0 then
-            printMsg(string.format('*** Modified %d job levels to 99 in Char Stats packet ***', modified));
+        -- Try multiple possible offsets for job levels array
+        -- Different sources report different offsets
+        local possibleOffsets = {
+            0x14,  -- Some sources say here
+            0x44,  -- Other sources say here  
+            0x60,  -- Also possible
+        };
+        
+        -- Main job level is at 0x0D, let's verify that first
+        local mainJobLevel = ptr[0x0D];
+        printMsg(string.format('  Main job level at 0x0D: %d', mainJobLevel));
+        
+        -- Force set main job level to 99
+        if mainJobLevel > 0 and mainJobLevel < 99 then
+            ptr[0x0D] = 99;
+            printMsg('  -> Set main job level to 99');
+        end
+        
+        -- Sub job level is at 0x0F
+        local subJobLevel = ptr[0x0F];
+        if subJobLevel > 0 and subJobLevel < 99 then
+            ptr[0x0F] = 99;
+            printMsg(string.format('  -> Set sub job level (%d -> 99)', subJobLevel));
         end
     end
 
