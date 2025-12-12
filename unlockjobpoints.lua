@@ -504,17 +504,50 @@ end);
 * Packet 0x08D is JobPoints Categories (individual upgrade counts per job)
 *   - Contains specific upgrade counts that may affect menu availability
 *
-* We modify totalJpSpent to 1 for any job with 0 spent to enable it in the menu.
+* Packet 0x061 is Char Stats containing job levels for all jobs.
+*   - We modify all job levels to 99 so the per-job JP menu checks pass.
+*
+* We modify totalJpSpent to 500 for any job under that threshold to enable it in the menu.
 --]]
 ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
-    -- Log ALL packets we receive if debug is on (to see what we're getting)
-    if state.debug and (e.id == 0x0063 or e.id == 0x008D) then
+    -- Log packets we receive if debug is on
+    if state.debug and (e.id == 0x0063 or e.id == 0x008D or e.id == 0x0061) then
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
         local hexDump = '';
         for i = 0, math.min(31, e.size - 1) do
             hexDump = hexDump .. string.format('%02X ', ptr[i]);
         end
         printMsg(string.format('Packet 0x%04X (size=%d): %s', e.id, e.size, hexDump));
+    end
+
+    -- Packet 0x061 = Char Stats (contains job levels)
+    -- We need to set all job levels to 99 for the JP menu per-job checks
+    if e.id == 0x0061 then
+        local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
+        
+        -- Job levels are stored starting at offset 0x14 (1 byte per job, jobs 0-22)
+        -- Format: job 0 (none) at 0x14, WAR at 0x15, MNK at 0x16, etc.
+        -- Reference: https://github.com/Windower/Lua/wiki/Incoming-Packet-0x061
+        local jobLevelOffset = 0x14;
+        local modified = 0;
+        
+        for jobId = 1, 22 do
+            local levelOffset = jobLevelOffset + jobId;
+            local currentLevel = ptr[levelOffset];
+            
+            -- Only modify if level is less than 99
+            if currentLevel < 99 and currentLevel > 0 then
+                ptr[levelOffset] = 99;  -- Set to 99 for JP menu
+                modified = modified + 1;
+                if state.debug then
+                    debugPrint(string.format('  Job %d level: %d -> 99', jobId, currentLevel));
+                end
+            end
+        end
+        
+        if modified > 0 then
+            printMsg(string.format('*** Modified %d job levels to 99 in Char Stats packet ***', modified));
+        end
     end
 
     -- Packet 0x063 = miscdata
