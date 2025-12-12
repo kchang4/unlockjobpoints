@@ -810,8 +810,8 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('  /ujp status       - Show current patch status');
         printMsg('  /ujp scan         - Scan for level check patterns');
         printMsg('  /ujp scanall      - Aggressive scan for ALL 99 comparisons');
-        printMsg('  /ujp scanjobs     - Scan for per-job enable patterns');
         printMsg('  /ujp nearjp       - Scan for 99 checks near JP menu code');
+        printMsg('  /ujp rawscan      - Show ALL 0x63 bytes near JP menu');
         printMsg('  /ujp patchnear    - Patch all 99 checks near JP menu');
         printMsg('  /ujp patchall     - Aggressively patch ALL 99 comparisons');
         printMsg('  /ujp patch <hex>  - Manually patch address');
@@ -915,47 +915,53 @@ ashita.events.register('command', 'command_cb', function(e)
             if byte == 0x63 then
                 -- Read context around this address
                 local context = '';
-                for i = -4, 8 do
+                for i = -6, 6 do
                     context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
                 end
 
-                -- Check if this looks like a comparison
-                local prevByte = ashita.memory.read_uint8(addr - 1);
-                local prev2Byte = ashita.memory.read_uint8(addr - 2);
-                local nextByte = ashita.memory.read_uint8(addr + 1);
+                -- Check bytes before this 0x63
+                local prev1 = ashita.memory.read_uint8(addr - 1);
+                local prev2 = ashita.memory.read_uint8(addr - 2);
+                local prev3 = ashita.memory.read_uint8(addr - 3);
+                local prev4 = ashita.memory.read_uint8(addr - 4);
+                local next1 = ashita.memory.read_uint8(addr + 1);
 
-                -- Look for patterns like: cmp X, 63h or comparison + jump
                 local isLikelyCompare = false;
                 local patternType = '';
 
-                -- 3C 63 = cmp al, 63h
-                if prev2Byte == 0x3C then
+                -- 3C 63 = cmp al, 63h (prev1 = 3C)
+                if prev1 == 0x3C then
                     isLikelyCompare = true;
                     patternType = 'cmp al,63h';
-                    -- 80 F9 63 = cmp cl, 63h
-                elseif prevByte == 0xF9 and prev2Byte == 0x80 then
+                -- 80 FX 63 = cmp Xl, 63h
+                elseif prev2 == 0x80 and prev1 >= 0xF8 and prev1 <= 0xFF then
                     isLikelyCompare = true;
-                    patternType = 'cmp cl,63h';
-                    -- 83 F8 63 = cmp eax, 63h
-                elseif prevByte == 0xF8 and prev2Byte == 0x83 then
+                    patternType = string.format('cmp %s,63h', 
+                        ({[0xF8]='al',[0xF9]='cl',[0xFA]='dl',[0xFB]='bl'})[prev1] or 'reg');
+                -- 83 FX 63 = cmp eXx, 63h
+                elseif prev2 == 0x83 and prev1 >= 0xF8 and prev1 <= 0xFF then
                     isLikelyCompare = true;
-                    patternType = 'cmp eax,63h';
-                    -- 80 7E XX 63 = cmp byte ptr [esi+XX], 63h
-                elseif prevByte >= 0x00 and prevByte <= 0xFF and prev2Byte == 0x7E and ashita.memory.read_uint8(addr - 3) == 0x80 then
+                    patternType = 'cmp e??,63h';
+                -- 80 7X YY 63 = cmp byte ptr [reg+YY], 63h
+                elseif prev3 == 0x80 and prev2 >= 0x78 and prev2 <= 0x7F then
                     isLikelyCompare = true;
-                    patternType = string.format('cmp [esi+%02X],63h', prevByte);
-                    -- 80 7C XX YY 63 = cmp byte ptr [reg+reg+YY], 63h (scaled access)
-                elseif ashita.memory.read_uint8(addr - 4) == 0x80 and ashita.memory.read_uint8(addr - 3) == 0x7C then
+                    patternType = string.format('cmp [reg+%02X],63h', prev1);
+                -- 80 3X YY 63 = cmp byte ptr [reg+YY], 63h (different encoding)
+                elseif prev3 == 0x80 and prev2 >= 0x38 and prev2 <= 0x3F then
+                    isLikelyCompare = true;
+                    patternType = 'cmp [reg],63h';
+                -- 80 7C XX YY 63 = cmp byte ptr [reg+reg*scale+off], 63h
+                elseif prev4 == 0x80 and prev3 == 0x7C then
                     isLikelyCompare = true;
                     patternType = 'cmp [reg+reg+off],63h';
-                    -- Check for any 80 7X patterns (cmp byte ptr)
-                elseif prev2Byte == 0x80 and (ashita.memory.read_uint8(addr - 3) >= 0x78 and ashita.memory.read_uint8(addr - 3) <= 0x7F) then
+                -- 38 XX 63 or 3A XX 63 - cmp with memory operand
+                elseif prev2 == 0x38 or prev2 == 0x3A or prev2 == 0x3B then
                     isLikelyCompare = true;
-                    patternType = 'cmp [reg+off],63h';
+                    patternType = 'cmp reg,mem';
                 end
 
                 -- Check if next byte is a jump instruction
-                local isJump = (nextByte >= 0x70 and nextByte <= 0x7F) or nextByte == 0x0F;
+                local isJump = (next1 >= 0x70 and next1 <= 0x7F) or next1 == 0x0F;
 
                 if isLikelyCompare then
                     local jumpStr = isJump and ' [JUMP]' or '';
@@ -966,6 +972,32 @@ ashita.events.register('command', 'command_cb', function(e)
         end
 
         printMsg(string.format('Found %d potential level 99 comparisons near JP menu code.', found));
+        if found == 0 then
+            printMsg('No patterns found. Try /ujp rawscan to see ALL 0x63 bytes.');
+        end
+    elseif cmd == 'rawscan' then
+        -- Raw scan: show ALL 0x63 bytes near JP menu code
+        local baseAddr = 0x045184F7;
+        local searchRange = 0x2000;
+        
+        printMsg(string.format('Raw scan for ALL 0x63 bytes near 0x%08X...', baseAddr));
+        
+        local found = 0;
+        for offset = -searchRange, searchRange do
+            local addr = baseAddr + offset;
+            local byte = ashita.memory.read_uint8(addr);
+
+            if byte == 0x63 then
+                local context = '';
+                for i = -6, 6 do
+                    context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
+                end
+                printMsg(string.format('  0x%08X: %s', addr, context));
+                found = found + 1;
+            end
+        end
+        
+        printMsg(string.format('Found %d occurrences of 0x63.', found));
     elseif cmd == 'patchnear' then
         -- Patch ALL level 99 comparisons near the JP menu code
         local baseAddr = 0x045184F7;
