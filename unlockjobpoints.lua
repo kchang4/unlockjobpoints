@@ -119,6 +119,7 @@ end
 *
 * The client has checks like:
 *   if (PTR_status_data.MainJobLevel >= 99u && (flags & 1) != 0)
+*   if (job_levels[jobId] >= 99) // per-job check
 *
 * We need to find these checks and change 99 (0x63) to 75 (0x4B)
 --]]
@@ -137,17 +138,58 @@ local function searchAndPatch()
         { pattern = '807F??6373',       offset = 3, name = 'cmp [edi+off],63h; jnb' },
         { pattern = '807E??630F82',     offset = 3, name = 'cmp [esi+off],63h; jb near' },
         { pattern = '807E??630F83',     offset = 3, name = 'cmp [esi+off],63h; jnb near' },
+        { pattern = '8078??6372',       offset = 3, name = 'cmp [eax+off],63h; jb' },
+        { pattern = '8078??6373',       offset = 3, name = 'cmp [eax+off],63h; jnb' },
+        { pattern = '8079??6372',       offset = 3, name = 'cmp [ecx+off],63h; jb' },
+        { pattern = '8079??6373',       offset = 3, name = 'cmp [ecx+off],63h; jnb' },
+        { pattern = '807A??6372',       offset = 3, name = 'cmp [edx+off],63h; jb' },
+        { pattern = '807A??6373',       offset = 3, name = 'cmp [edx+off],63h; jnb' },
+        { pattern = '807B??6372',       offset = 3, name = 'cmp [ebx+off],63h; jb' },
+        { pattern = '807B??6373',       offset = 3, name = 'cmp [ebx+off],63h; jnb' },
         -- cmp al, 63h followed by conditional jump
         { pattern = '3C6372',           offset = 1, name = 'cmp al,63h; jb' },
         { pattern = '3C6373',           offset = 1, name = 'cmp al,63h; jnb' },
         { pattern = '3C630F82',         offset = 1, name = 'cmp al,63h; jb near' },
         { pattern = '3C630F83',         offset = 1, name = 'cmp al,63h; jnb near' },
+        -- cmp cl/dl/bl, 63h (other register comparisons)
+        { pattern = '80F96372',         offset = 2, name = 'cmp cl,63h; jb' },
+        { pattern = '80F96373',         offset = 2, name = 'cmp cl,63h; jnb' },
+        { pattern = '80FA6372',         offset = 2, name = 'cmp dl,63h; jb' },
+        { pattern = '80FA6373',         offset = 2, name = 'cmp dl,63h; jnb' },
+        { pattern = '80FB6372',         offset = 2, name = 'cmp bl,63h; jb' },
+        { pattern = '80FB6373',         offset = 2, name = 'cmp bl,63h; jnb' },
         -- cmp byte ptr [addr], 63h followed by conditional jump
         { pattern = '803D????????6372', offset = 6, name = 'cmp byte ptr [addr],63h; jb' },
         { pattern = '803D????????6373', offset = 6, name = 'cmp byte ptr [addr],63h; jnb' },
         -- movzx then cmp pattern (common for level checks)
         { pattern = '0FB6??3C6372',     offset = 4, name = 'movzx; cmp al,63h; jb' },
         { pattern = '0FB6??3C6373',     offset = 4, name = 'movzx; cmp al,63h; jnb' },
+        -- cmp reg, 63h (32-bit register compare with immediate)
+        { pattern = '83F86372',         offset = 2, name = 'cmp eax,63h; jb' },
+        { pattern = '83F86373',         offset = 2, name = 'cmp eax,63h; jnb' },
+        { pattern = '83F9637?',         offset = 2, name = 'cmp ecx,63h; j?' },
+        { pattern = '83FA637?',         offset = 2, name = 'cmp edx,63h; j?' },
+        { pattern = '83FB637?',         offset = 2, name = 'cmp ebx,63h; j?' },
+        { pattern = '83FE637?',         offset = 2, name = 'cmp esi,63h; j?' },
+        { pattern = '83FF637?',         offset = 2, name = 'cmp edi,63h; j?' },
+        -- Array-indexed level checks: cmp byte ptr [base+reg], 63h
+        -- These are used for per-job level checks like: if (job_levels[jobId] >= 99)
+        { pattern = '3A??6372',         offset = 2, name = 'cmp reg,[reg+off]; jb (val=63h)' },
+        { pattern = '3A??6373',         offset = 2, name = 'cmp reg,[reg+off]; jnb (val=63h)' },
+        -- cmp byte ptr [reg+reg+offset], 63h - scaled array access
+        { pattern = '807C??006372',     offset = 4, name = 'cmp [reg+reg+0],63h; jb' },
+        { pattern = '807C??006373',     offset = 4, name = 'cmp [reg+reg+0],63h; jnb' },
+        { pattern = '807C????6372',     offset = 4, name = 'cmp [reg+reg+off],63h; jb' },
+        { pattern = '807C????6373',     offset = 4, name = 'cmp [reg+reg+off],63h; jnb' },
+        -- More general patterns without specific jumps (aggressive)
+        { pattern = '3C6374',           offset = 1, name = 'cmp al,63h; je' },
+        { pattern = '3C6375',           offset = 1, name = 'cmp al,63h; jne' },
+        { pattern = '3C6376',           offset = 1, name = 'cmp al,63h; jbe' },
+        { pattern = '3C6377',           offset = 1, name = 'cmp al,63h; ja' },
+        { pattern = '3C637C',           offset = 1, name = 'cmp al,63h; jl' },
+        { pattern = '3C637D',           offset = 1, name = 'cmp al,63h; jge' },
+        { pattern = '3C637E',           offset = 1, name = 'cmp al,63h; jle' },
+        { pattern = '3C637F',           offset = 1, name = 'cmp al,63h; jg' },
     };
 
     local patched = {}; -- Track addresses we've already patched
@@ -289,14 +331,22 @@ local function scanForPatterns()
         { pattern = '3C63',           name = 'cmp al,63h' },
         { pattern = '803D????????63', name = 'cmp byte ptr [addr],63h' },
         { pattern = '83??63',         name = 'cmp reg,63h' },
+        { pattern = '80F963',         name = 'cmp cl,63h' },
+        { pattern = '80FA63',         name = 'cmp dl,63h' },
+        { pattern = '80FB63',         name = 'cmp bl,63h' },
     };
 
     local found = 0;
     for _, p in ipairs(patterns) do
         local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, 0);
         local count = 0;
-        while addr ~= 0 and count < 10 do
-            printMsg(string.format('  %s at 0x%08X', p.name, addr));
+        while addr ~= 0 and count < 15 do
+            -- Read bytes before and after to show context
+            local context = '';
+            for i = -4, 8 do
+                context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
+            end
+            printMsg(string.format('  %s at 0x%08X: %s', p.name, addr, context));
             found = found + 1;
             count = count + 1;
             -- Search for next occurrence
@@ -305,6 +355,60 @@ local function scanForPatterns()
     end
 
     printMsg(string.format('Scan complete. Found %d potential patterns.', found));
+end
+
+--[[
+* Scan for ALL level 99 references (aggressive search)
+--]]
+local function scanAll99()
+    printMsg('Scanning FFXiMain.dll for ALL level 99 (0x63) comparisons...');
+    printMsg('This may find many false positives. Look for patterns near JP menu code.');
+
+    -- Very broad patterns - just looking for 0x63 in comparison contexts
+    local patterns = {
+        -- Any cmp byte with 0x63
+        { pattern = '80??63', offset = 2, name = 'cmp byte,63h' },
+        { pattern = '3C63',   offset = 1, name = 'cmp al,63h' },
+        { pattern = '80F963', offset = 2, name = 'cmp cl,63h' },
+        { pattern = '80FA63', offset = 2, name = 'cmp dl,63h' },
+        { pattern = '83F863', offset = 2, name = 'cmp eax,63h' },
+        { pattern = '83F963', offset = 2, name = 'cmp ecx,63h' },
+        { pattern = '83FA63', offset = 2, name = 'cmp edx,63h' },
+        { pattern = '83FE63', offset = 2, name = 'cmp esi,63h' },
+        { pattern = '83FF63', offset = 2, name = 'cmp edi,63h' },
+    };
+
+    local found = 0;
+    local results = {};
+
+    for _, p in ipairs(patterns) do
+        local count = 0;
+        local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+
+        while addr ~= 0 and count < 30 do
+            -- Check if this looks like a level check (followed by conditional jump)
+            local nextByte = ashita.memory.read_uint8(addr + #p.pattern / 2);
+            local isJump = (nextByte >= 0x70 and nextByte <= 0x7F) or (nextByte == 0x0F);
+
+            local context = '';
+            for i = -2, 6 do
+                context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
+            end
+
+            if isJump then
+                printMsg(string.format('  [JUMP] %s at 0x%08X: %s', p.name, addr, context));
+            else
+                debugPrint(string.format('  [----] %s at 0x%08X: %s', p.name, addr, context));
+            end
+
+            found = found + 1;
+            count = count + 1;
+            addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+        end
+    end
+
+    printMsg(string.format('Scan complete. Found %d patterns (showing those with jumps).', found));
+    printMsg('Enable debug mode to see all patterns: /ujp debug');
 end
 
 --[[
@@ -417,13 +521,13 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
     if e.id == 0x0063 then
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
         local subtype = ptr[0x04];
-        
+
         debugPrint(string.format('Packet 0x063 subtype=%d (0x%02X)', subtype, subtype));
 
         -- Subtype 0x05 = Job Points Totals data
         if subtype == 0x05 then
             printMsg('*** Intercepted Job Points TOTALS packet (0x063 subtype 0x05) ***');
-            
+
             -- Based on tCrossBar analysis:
             -- playerData.JobPoints[i].Total = struct.unpack('H', e.data, 0x0C + 0x04 + (6 * i) + 1);
             -- In 0-based terms: offset = 0x0C + 0x04 + (6 * i) = 0x10 + (6 * i) for totalJpSpent
@@ -431,59 +535,61 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
             -- Entry layout: capacityPoints(2), currentJp(2), totalJpSpent(2)
             -- So Total is at offset 4 within entry (totalJpSpent)
             -- Base offset for job data is 0x0C (after 4-byte header + 8 bytes misc = 0x0C)
-            
-            local jobDataOffset = 0x0C;  -- Start of job array
+
+            local jobDataOffset = 0x0C;   -- Start of job array
             local jobEntrySize = 6;       -- Each entry is 6 bytes
             local totalJpSpentOffset = 4; -- totalJpSpent is at offset 4 within entry
-            
+
             local modified = 0;
             for jobId = 1, 22 do
                 local entryOffset = jobDataOffset + (jobId * jobEntrySize);
                 local spentOffset = entryOffset + totalJpSpentOffset;
-                
+
                 -- Read current values for debugging
                 local cpLow = ptr[entryOffset];
                 local cpHigh = ptr[entryOffset + 1];
                 local capacityPoints = cpLow + (cpHigh * 256);
-                
+
                 local jpLow = ptr[entryOffset + 2];
                 local jpHigh = ptr[entryOffset + 3];
                 local currentJp = jpLow + (jpHigh * 256);
-                
+
                 local spentLow = ptr[spentOffset];
                 local spentHigh = ptr[spentOffset + 1];
                 local totalSpent = spentLow + (spentHigh * 256);
-                
+
                 if state.debug and jobId <= 5 then
-                    debugPrint(string.format('  Job %d @ 0x%02X: CP=%d, JP=%d, Spent=%d', 
+                    debugPrint(string.format('  Job %d @ 0x%02X: CP=%d, JP=%d, Spent=%d',
                         jobId, entryOffset, capacityPoints, currentJp, totalSpent));
                 end
-                
-                if totalSpent == 0 then
-                    -- Set to 1 to enable the job in the menu
-                    ptr[spentOffset] = 1;
-                    ptr[spentOffset + 1] = 0;
+
+                if totalSpent < 500 then
+                    -- Set to 500 to enable the job in the menu
+                    -- (1 wasn't enough - client may check for minimum threshold)
+                    -- 500 = 0x01F4 in little-endian: F4 01
+                    ptr[spentOffset] = 0xF4;
+                    ptr[spentOffset + 1] = 0x01;
                     modified = modified + 1;
                 end
             end
-            
+
             if modified > 0 then
-                printMsg(string.format('Modified %d jobs: totalJpSpent 0 -> 1', modified));
+                printMsg(string.format('Modified %d jobs: totalJpSpent -> 500', modified));
             else
-                printMsg('No jobs needed modification (all have spent > 0)');
+                printMsg('No jobs needed modification (all have spent >= 500)');
             end
         end
     end
-    
+
     -- Packet 0x08D = Job Points Categories
     if e.id == 0x008D then
         printMsg('*** Received Job Points CATEGORIES packet (0x08D) ***');
-        
+
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
         local jobPointCount = (e.size / 4) - 1;
-        
+
         debugPrint(string.format('  Job Point entries: %d', jobPointCount));
-        
+
         -- From tCrossBar:
         -- local index = ashita.bits.unpack_be(e.data_raw, offset, 0, 5);
         -- local job = ashita.bits.unpack_be(e.data_raw, offset, 5, 11);
@@ -509,6 +615,7 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('Commands:');
         printMsg('  /ujp status       - Show current patch status');
         printMsg('  /ujp scan         - Scan for level check patterns');
+        printMsg('  /ujp scanall      - Aggressive scan for ALL 99 comparisons');
         printMsg('  /ujp scanjobs     - Scan for per-job enable patterns');
         printMsg('  /ujp dumpjobs     - Info about job points data structure');
         printMsg('  /ujp findjpdata   - Search for JP data references');
@@ -536,6 +643,8 @@ ashita.events.register('command', 'command_cb', function(e)
         end
     elseif cmd == 'scan' then
         scanForPatterns();
+    elseif cmd == 'scanall' then
+        scanAll99();
     elseif cmd == 'scanjobs' then
         scanForJobPatterns();
     elseif cmd == 'patch' then
@@ -615,17 +724,17 @@ ashita.events.register('command', 'command_cb', function(e)
         -- Packet 0x61 requests main menu data (triggers job point totals via 0x063 subtype 5)
         -- Packet 0xC0 requests job point menu data (triggers categories via 0x08D)
         printMsg('Requesting job points data from server...');
-        
+
         -- Request main menu data (triggers 0x063 subtype 5)
         local packet1 = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
         AshitaCore:GetPacketManager():AddOutgoingPacket(0x61, packet1);
         printMsg('  Sent packet 0x61 (main menu request)');
-        
+
         -- Request job point categories (triggers 0x08D)
         local packet2 = { 0x00, 0x00, 0x00, 0x00 };
         AshitaCore:GetPacketManager():AddOutgoingPacket(0xC0, packet2);
         printMsg('  Sent packet 0xC0 (job point menu request)');
-        
+
         printMsg('Check chat for packet interception messages.');
     elseif cmd == 'dumpjobs' then
         -- Try to find and dump the job points data structure in memory
