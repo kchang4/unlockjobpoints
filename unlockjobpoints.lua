@@ -404,6 +404,9 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('  /ujp status       - Show current patch status');
         printMsg('  /ujp scan         - Scan for level check patterns');
         printMsg('  /ujp scanjobs     - Scan for per-job enable patterns');
+        printMsg('  /ujp dumpjobs     - Info about job points data structure');
+        printMsg('  /ujp findjpdata   - Search for JP data references');
+        printMsg('  /ujp watchmem <addr> <len> - Dump memory region');
         printMsg('  /ujp patch <hex>  - Manually patch address');
         printMsg('  /ujp restore      - Restore all patches');
         printMsg('  /ujp repatch      - Re-apply automatic patches');
@@ -499,6 +502,99 @@ ashita.events.register('command', 'command_cb', function(e)
     elseif cmd == 'debug' then
         state.debug = not state.debug;
         printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
+    elseif cmd == 'dumpjobs' then
+        -- Try to find and dump the job points data structure in memory
+        -- The data is structured as: capacityPoints(u16), currentJp(u16), totalJpSpent(u16) per job
+        -- Total: 6 bytes per job, 23 jobs (0-22)
+        printMsg('Searching for job points data structure in memory...');
+        
+        -- Job names for display
+        local jobNames = {
+            [0] = 'NON', [1] = 'WAR', [2] = 'MNK', [3] = 'WHM', [4] = 'BLM', [5] = 'RDM',
+            [6] = 'THF', [7] = 'PLD', [8] = 'DRK', [9] = 'BST', [10] = 'BRD', [11] = 'RNG',
+            [12] = 'SAM', [13] = 'NIN', [14] = 'DRG', [15] = 'SMN', [16] = 'BLU', [17] = 'COR',
+            [18] = 'PUP', [19] = 'DNC', [20] = 'SCH', [21] = 'GEO', [22] = 'RUN',
+        };
+        
+        -- Try to find jobpoints data by searching for the pattern sent by server
+        -- Look for a pointer to the job points array
+        -- The data comes from packet 0x063 subtype JobPoints
+        
+        -- Search for common patterns that might be near job point data
+        local searchPatterns = {
+            '00000000000000000000000000', -- Array of zeros (uninitialized jobs)
+        };
+        
+        -- Alternative: Try to find the data structure by looking for specific patterns
+        -- in the FFXiMain.dll data section
+        printMsg('Job Point Entry Structure: {capacityPoints(u16), currentJp(u16), totalJpSpent(u16)}');
+        printMsg('SMN is job index 15 (0x0F)');
+        printMsg('');
+        printMsg('Use /ujp findjpdata to search for JP data pointer');
+        
+    elseif cmd == 'findjpdata' then
+        -- Try to find the job points data by searching for known patterns
+        printMsg('Searching FFXiMain.dll for job points data references...');
+        
+        -- Look for code that accesses the job points structure
+        -- The client likely has code like: lea reg, [jobPointsArray + jobId*6]
+        -- Or: mov reg, [jobPointsArrayPtr]
+        
+        -- Search for patterns that reference the totalJpSpent offset (+4)
+        local patterns = {
+            { pattern = '6683??0600', name = 'cmp word [reg+6],0 (totalJpSpent check)' },
+        };
+        
+        printMsg('Addresses with totalJpSpent checks:');
+        for _, p in ipairs(patterns) do
+            local count = 0;
+            local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+            
+            while addr ~= 0 and count < 30 do
+                -- Read context around this address to understand the code
+                local context = '';
+                for i = -4, 12 do
+                    context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
+                end
+                printMsg(string.format('  0x%08X: %s', addr, context));
+                
+                count = count + 1;
+                addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+            end
+        end
+        
+    elseif cmd == 'watchmem' then
+        -- Watch a memory region for changes (useful for finding what changes when selecting a job)
+        if #args < 4 then
+            printError('Usage: /ujp watchmem <start_addr> <length>');
+            printMsg('Example: /ujp watchmem 04470000 100');
+            return;
+        end
+        
+        local startAddr = tonumber(args[3], 16);
+        local length = tonumber(args[4]);
+        
+        if not startAddr or not length then
+            printError('Invalid address or length');
+            return;
+        end
+        
+        printMsg(string.format('Reading %d bytes from 0x%08X:', length, startAddr));
+        
+        local line = '';
+        for i = 0, length - 1 do
+            local byte = ashita.memory.read_uint8(startAddr + i);
+            line = line .. string.format('%02X ', byte);
+            
+            if (i + 1) % 16 == 0 then
+                printMsg(string.format('  +%03X: %s', i - 15, line));
+                line = '';
+            end
+        end
+        
+        if #line > 0 then
+            printMsg(string.format('  +%03X: %s', length - (#line / 3), line));
+        end
     else
         printError('Unknown command: ' .. cmd);
         printMsg('Use /ujp help for command list.');
