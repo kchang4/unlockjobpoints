@@ -801,15 +801,14 @@ ashita.events.register('command', 'command_cb', function(e)
 
     if cmd == 'status' then
         printMsg(string.format('Active patches: %d', #state.patches));
-        printMsg(string.format('Auto-set job levels: %s', state.autoSetLevels and 'ON' or 'OFF'));
-        printMsg(string.format('Job levels address: %s',
-            state.jobLevelsAddr and string.format('0x%08X', state.jobLevelsAddr) or 'not found'));
         printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
         if #state.patches > 0 then
             printMsg('Patches:');
             for i, p in ipairs(state.patches) do
-                local purpose = knownAddresses[p.ptr] or 'unknown';
-                printMsg(string.format('  %d: 0x%08X [%s] (%s)', i, p.ptr, p.pattern, purpose));
+                local addr = p.ptr or p.address or 0;
+                local pattern = p.pattern or 'unknown';
+                local purpose = knownAddresses[addr] or 'unknown';
+                printMsg(string.format('  %d: 0x%08X [%s] (%s)', i, addr, pattern, purpose));
             end
             printMsg('Use /ujp test <num> to test individual patches.');
         end
@@ -1064,16 +1063,24 @@ ashita.events.register('command', 'command_cb', function(e)
         end
 
         local p = state.patches[num];
-        local currentByte = ashita.memory.read_uint8(p.ptr);
+        local addr = p.ptr or p.address;
+        local backup = p.backup or p.original;
+        
+        if not addr or not backup then
+            printError('Invalid patch data at index ' .. num);
+            return;
+        end
+        
+        local currentByte = ashita.memory.read_uint8(addr);
 
         if currentByte == TARGET_LEVEL then
             -- Currently patched, restore original
-            ashita.memory.write_uint8(p.ptr, p.backup);
-            printMsg(string.format('Patch %d DISABLED (0x%08X now 0x%02X). Zone to test effect.', num, p.ptr, p.backup));
+            ashita.memory.write_uint8(addr, backup);
+            printMsg(string.format('Patch %d DISABLED (0x%08X now 0x%02X). Zone to test effect.', num, addr, backup));
         else
             -- Currently original, apply patch
-            ashita.memory.write_uint8(p.ptr, TARGET_LEVEL);
-            printMsg(string.format('Patch %d ENABLED (0x%08X now 0x%02X). Zone to test effect.', num, p.ptr, TARGET_LEVEL));
+            ashita.memory.write_uint8(addr, TARGET_LEVEL);
+            printMsg(string.format('Patch %d ENABLED (0x%08X now 0x%02X). Zone to test effect.', num, addr, TARGET_LEVEL));
         end
     elseif cmd == 'read' then
         if #args < 3 then
