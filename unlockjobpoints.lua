@@ -187,7 +187,7 @@ end
 --]]
 local function patchPerJobCheck()
     local patchCount = 0;
-    
+
     -- Patterns for "compare word to 0" followed by conditional jump
     -- The job_points_spent is a uint16 at offset 4 in jobpointentry_t
     -- Common patterns:
@@ -195,74 +195,74 @@ local function patchPerJobCheck()
     --   66 83 7F 04 00 74 XX  = cmp word ptr [edi+4], 0; je short
     --   66 83 78 04 00 74 XX  = cmp word ptr [eax+4], 0; je short
     --   66 39 ?? 04 74 XX     = cmp [reg+4], reg; je short (comparing to zero via register)
-    
+
     local patterns = {
         -- From scanjobs output - these are the patterns that check points_spent (offset +4)
         -- The pattern is: cmp word ptr [reg+4], 0 (66 83 7X 04 00) followed by jbe (76)
         -- JBE means "if points_spent <= 0, skip" - we NOP it to always fall through (enable)
-        
+
         -- Pattern: 66 83 78 04 00 76 = cmp word ptr [eax+4], 0; jbe
         -- Found at 0x04474026 - likely Job Points menu item enable check
         { pattern = '6683780400', offset = 5, patchLen = 2, name = 'cmp word [eax+4],0 - NOP jbe' },
-        
-        -- Pattern: 66 83 7E 04 00 76 = cmp word ptr [esi+4], 0; jbe  
+
+        -- Pattern: 66 83 7E 04 00 76 = cmp word ptr [esi+4], 0; jbe
         -- Found at 0x04474108 - another Job Points menu check
         { pattern = '66837E0400', offset = 5, patchLen = 2, name = 'cmp word [esi+4],0 - NOP jbe' },
-        
+
         -- Pattern: 66 83 79 04 00 76 = cmp word ptr [ecx+4], 0; jbe
         -- Found at 0x044C18E0
         { pattern = '6683790400', offset = 5, patchLen = 2, name = 'cmp word [ecx+4],0 - NOP jbe' },
     };
-    
+
     local patched = {};
-    
+
     for _, p in ipairs(patterns) do
         local count = 0;
         local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
-        
+
         while addr ~= 0 and count < 30 do
             local patchAddr = addr + p.offset;
-            
+
             -- Check if this is followed by a conditional jump (76=JBE, 74=JE, 77=JA)
             local jumpByte = ashita.memory.read_uint8(patchAddr);
             local isConditionalJump = (jumpByte == 0x76 or jumpByte == 0x74 or jumpByte == 0x77 or jumpByte == 0x75);
-            
+
             if not patched[patchAddr] and isConditionalJump then
                 -- NOP out the 2-byte conditional jump
                 local original1 = ashita.memory.read_uint8(patchAddr);
                 local original2 = ashita.memory.read_uint8(patchAddr + 1);
-                
+
                 -- Store original bytes for restore
-                table.insert(patchedLocations, {
+                table.insert(state.patches, {
                     address = patchAddr,
                     original = original1,
                     patched = 0x90,
                     description = p.name .. ' byte 1'
                 });
-                table.insert(patchedLocations, {
+                table.insert(state.patches, {
                     address = patchAddr + 1,
                     original = original2,
                     patched = 0x90,
                     description = p.name .. ' byte 2'
                 });
-                
+
                 -- Apply NOP patches
                 ashita.memory.write_uint8(patchAddr, 0x90);
                 ashita.memory.write_uint8(patchAddr + 1, 0x90);
-                
+
                 patched[patchAddr] = true;
                 patchCount = patchCount + 1;
-                printMsg(string.format('Per-job patch: NOP at 0x%08X (was %02X %02X) - %s', 
+                printMsg(string.format('Per-job patch: NOP at 0x%08X (was %02X %02X) - %s',
                     patchAddr, original1, original2, p.name));
             elseif not patched[patchAddr] then
                 debugPrint(string.format('Skipped 0x%08X - not a conditional jump (byte=%02X)', patchAddr, jumpByte));
             end
-            
+
             count = count + 1;
             addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
         end
     end
-    
+
     return patchCount;
 end
 
@@ -308,11 +308,11 @@ local function scanForJobPatterns()
     -- Looking for "cmp word ptr [reg+offset], 0" patterns
     -- These are used to check if job_points_spent > 0
     local patterns = {
-        { pattern = '6683??0400',   name = 'cmp word [reg+4],0' },
-        { pattern = '6683??0600',   name = 'cmp word [reg+6],0' },
-        { pattern = '6685??04',     name = 'test word [reg+4]' },
-        { pattern = '663B??04',     name = 'cmp word reg,[reg+4]' },
-        { pattern = '668B??04',     name = 'mov word reg,[reg+4]' },
+        { pattern = '6683??0400', name = 'cmp word [reg+4],0' },
+        { pattern = '6683??0600', name = 'cmp word [reg+6],0' },
+        { pattern = '6685??04',   name = 'test word [reg+4]' },
+        { pattern = '663B??04',   name = 'cmp word reg,[reg+4]' },
+        { pattern = '668B??04',   name = 'mov word reg,[reg+4]' },
     };
 
     local found = 0;
@@ -354,7 +354,7 @@ ashita.events.register('load', 'load_cb', function()
 
     -- Try to find and apply per-job unlock patches
     local perJobCount = patchPerJobCheck();
-    
+
     if perJobCount > 0 then
         printSuccess(string.format('Applied %d per-job patch(es). All jobs now enabled in JP menu.', perJobCount));
     else
