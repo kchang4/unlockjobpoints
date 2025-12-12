@@ -21,7 +21,7 @@
 
 addon.name      = 'unlockjobpoints';
 addon.author    = 'FFXI-Ashita';
-addon.version   = '1.1.0';
+addon.version   = '1.2.0';
 addon.desc      = 'Unlocks the Job Points menu at any level (for 75-era servers)';
 addon.link      = 'https://github.com/kchang4/unlockjobpoints';
 
@@ -30,28 +30,48 @@ local ffi = require('ffi');
 local jit = require('jit');
 jit.on();
 
+-- Configuration: Set to true to enable spoofing level to 99 for menu access
+local SPOOF_LEVEL_99 = true;
+
 --[[
 * event: packet_in
 * desc : Event called when the addon is processing incoming packets.
+*
+* Packet 0x0061 (CLISTATUS) layout:
+*   0x00-0x03: Header (id, size, sync)
+*   0x04-0x07: hpmax (int32)
+*   0x08-0x0B: mpmax (int32)
+*   0x0C: mjob_no (uint8) - main job id
+*   0x0D: mjob_lv (uint8) - main job level  <-- THIS IS WHAT WE SPOOF
+*   0x0E: sjob_no (uint8) - sub job id
+*   0x0F: sjob_lv (uint8) - sub job level
+*   ... more fields ...
+*
+* Packet 0x0063 type 0x05 (Job Points):
+*   0x08: access flags (bit 0 = menu unlocked)
 --]]
 ashita.events.register('packet_in', 'packet_in_cb', function (e)
-    -- Check for packet 0x63 (Miscdata)
+    local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
+    
+    -- Packet 0x0061: CLISTATUS - Spoof main job level to 99
+    if (e.id == 0x0061 and SPOOF_LEVEL_99) then
+        local actualLevel = ptr[0x0D];
+        if (actualLevel < 99) then
+            ptr[0x0D] = 99;  -- Spoof level to 99 for client UI
+            print(string.format('[JobPointsUnlock] Spoofed level %d -> 99 for menu access', actualLevel));
+        end
+    end
+    
+    -- Packet 0x0063: Miscdata - Force job points access flag
     if (e.id == 0x0063) then
-        local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
-        
-        -- Get the packet type at offset 0x04 (uint16)
         local packetType = ptr[0x04];
         
         -- Type 0x05 = Job Points
         if (packetType == 0x05) then
-            -- The access/flags byte is at offset 0x08
-            -- We need to set bit 0 to 1 to enable the menu
             local currentFlags = ptr[0x08];
-            
             if (bit.band(currentFlags, 1) == 0) then
-                -- Force the access flag to 1
                 ptr[0x08] = bit.bor(currentFlags, 1);
-                print('[UnlockJobPoints] Enabled job points menu access');
+                print('[JobPointsUnlock] Enabled job points access flag');
             end
         end
     end
@@ -62,8 +82,8 @@ end);
 * desc : Event called when the addon is being loaded.
 --]]
 ashita.events.register('load', 'load_cb', function ()
-    print('[UnlockJobPoints] Addon loaded - Job Points menu will be unlocked regardless of level');
-    print('[UnlockJobPoints] Zone or relog to apply changes');
+    print('[JobPointsUnlock] Addon loaded - Job Points menu will be unlocked regardless of level');
+    print('[JobPointsUnlock] Zone or relog to apply changes');
 end);
 
 --[[
@@ -71,5 +91,5 @@ end);
 * desc : Event called when the addon is being unloaded.
 --]]
 ashita.events.register('unload', 'unload_cb', function ()
-    print('[UnlockJobPoints] Addon unloaded');
+    print('[JobPointsUnlock] Addon unloaded');
 end);
