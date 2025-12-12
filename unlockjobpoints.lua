@@ -192,7 +192,7 @@ local function patchPerJobCheck()
     -- Search for the full pattern including the conditional jump
     -- Pattern: 66 83 7? 04 00 76 XX (cmp word [reg+4], 0; jbe XX)
     -- We NOP the JBE instruction (2 bytes at offset 5-6)
-    
+
     local patterns = {
         -- 66 83 78 04 00 76 = cmp word ptr [eax+4], 0; jbe
         { pattern = '668378040076', jumpOffset = 5, name = 'cmp word [eax+4],0; jbe' },
@@ -207,20 +207,20 @@ local function patchPerJobCheck()
         { pattern = '66837E040074', jumpOffset = 5, name = 'cmp word [esi+4],0; je' },
         { pattern = '668379040074', jumpOffset = 5, name = 'cmp word [ecx+4],0; je' },
     };
-    
+
     local patched = {};
-    
+
     for _, p in ipairs(patterns) do
         local count = 0;
         local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
-        
+
         while addr ~= 0 and count < 50 do
             local patchAddr = addr + p.jumpOffset;
-            
+
             if not patched[patchAddr] then
                 local byte1 = ashita.memory.read_uint8(patchAddr);
                 local byte2 = ashita.memory.read_uint8(patchAddr + 1);
-                
+
                 -- Store for restore
                 table.insert(state.patches, {
                     address = patchAddr,
@@ -234,17 +234,17 @@ local function patchPerJobCheck()
                     patched = 0x90,
                     description = p.name .. ' byte 2'
                 });
-                
+
                 -- NOP the conditional jump
                 ashita.memory.write_uint8(patchAddr, 0x90);
                 ashita.memory.write_uint8(patchAddr + 1, 0x90);
-                
+
                 patched[patchAddr] = true;
                 patchCount = patchCount + 1;
-                printMsg(string.format('Per-job patch at 0x%08X: NOP (was %02X %02X) - %s', 
+                printMsg(string.format('Per-job patch at 0x%08X: NOP (was %02X %02X) - %s',
                     patchAddr, byte1, byte2, p.name));
             end
-            
+
             count = count + 1;
             addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
         end
