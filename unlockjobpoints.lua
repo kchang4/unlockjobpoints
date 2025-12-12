@@ -599,20 +599,7 @@ ashita.events.register('load', 'load_cb', function()
         printMsg('No per-job patches applied (may not be needed or patterns not found).');
     end
 
-    -- Try to find the job levels address and set all to 99
-    if state.autoSetLevels then
-        state.jobLevelsAddr = findJobLevelsAddress();
-        if state.jobLevelsAddr then
-            local modified = setAllJobLevels99(true);
-            if modified > 0 then
-                printSuccess(string.format('Auto-set %d job levels to 99 (addr: 0x%08X)', modified, state.jobLevelsAddr));
-            end
-        else
-            printMsg('Job levels address not found yet. Will try after packets arrive.');
-        end
-    end
-
-    printMsg('Auto-set job levels: ' .. (state.autoSetLevels and 'ON' or 'OFF'));
+    printMsg('Use /ujp patchscanall to patch all level 99 checks.');
     printMsg('Commands: /ujp help');
 end);
 
@@ -661,60 +648,12 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
     end
 
     -- Packet 0x061 = Char Stats (contains job levels)
-    -- We need to set all job levels to 99 for the JP menu per-job checks
-    if e.id == 0x0061 then
+    -- Just log for debugging, don't modify (causes visual bug)
+    if e.id == 0x0061 and state.debug then
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
-
-        printMsg(string.format('*** Intercepted Char Stats packet (0x061) size=%d ***', e.size));
-
-        -- Dump first 64 bytes to see structure
-        if state.debug then
-            local hexDump = '';
-            for i = 0, math.min(63, e.size - 1) do
-                hexDump = hexDump .. string.format('%02X ', ptr[i]);
-                if (i + 1) % 16 == 0 then
-                    debugPrint(string.format('  0x%02X: %s', i - 15, hexDump));
-                    hexDump = '';
-                end
-            end
-        end
-
-        -- Try multiple possible offsets for job levels array
-        -- Different sources report different offsets
-        local possibleOffsets = {
-            0x14, -- Some sources say here
-            0x44, -- Other sources say here
-            0x60, -- Also possible
-        };
-
-        -- Main job level is at 0x0D, let's verify that first
         local mainJobLevel = ptr[0x0D];
-        printMsg(string.format('  Main job level at 0x0D: %d', mainJobLevel));
-
-        -- Force set main job level to 99
-        if mainJobLevel > 0 and mainJobLevel < 99 then
-            ptr[0x0D] = 99;
-            printMsg('  -> Set main job level to 99');
-        end
-
-        -- Sub job level is at 0x0F
         local subJobLevel = ptr[0x0F];
-        if subJobLevel > 0 and subJobLevel < 99 then
-            ptr[0x0F] = 99;
-            printMsg(string.format('  -> Set sub job level (%d -> 99)', subJobLevel));
-        end
-
-        -- After packet processing, re-apply level 99 to client's cached job levels
-        -- The packet will have overwritten our previous modifications
-        if state.autoSetLevels then
-            -- Use a short delay to let the packet finish processing
-            ashita.tasks.once(0.1, function()
-                local modified = setAllJobLevels99(true);
-                if modified > 0 then
-                    debugPrint(string.format('Auto-set %d job levels to 99 after packet', modified));
-                end
-            end);
-        end
+        debugPrint(string.format('Char Stats packet: Main Lv.%d, Sub Lv.%d', mainJobLevel, subJobLevel));
     end
 
     -- Packet 0x063 = miscdata
