@@ -35,9 +35,18 @@ local ORIGINAL_LEVEL = 0x63; -- 99 in hex
 
 -- Addon state
 local state = {
-    patches = {},       -- Array of {ptr=address, backup=original_byte}
+    patches = {},       -- Array of {ptr=address, backup=original_byte, pattern=name}
     gc = nil,           -- Garbage collector for cleanup
     debug = false,
+};
+
+-- Known working addresses for specific client versions (add yours here after testing)
+-- Format: { address = purpose }
+local knownAddresses = {
+    -- Your client version (add after identifying which patch does what):
+    -- [0x0459A605] = 'Job Points Menu',
+    -- [0x047338F9] = 'Unknown (Master Levels?)',
+    -- [0x045184F7] = 'Unknown (CP Display?)',
 };
 
 --[[
@@ -66,22 +75,24 @@ end
 *
 * @param {number} addr - The address to patch
 * @param {number} newByte - The new byte value
+* @param {string} patternName - Name of the pattern that matched
 * @return {boolean} - True if successful
 --]]
-local function applyPatch(addr, newByte)
+local function applyPatch(addr, newByte, patternName)
     -- Read original byte
     local original = ashita.memory.read_uint8(addr);
     
-    -- Store backup
+    -- Store backup with pattern name
     table.insert(state.patches, {
         ptr = addr,
         backup = original,
+        pattern = patternName or 'manual',
     });
     
     -- Write new byte
     ashita.memory.write_uint8(addr, newByte);
     
-    debugPrint(string.format('Patched 0x%08X: 0x%02X -> 0x%02X', addr, original, newByte));
+    debugPrint(string.format('Patched 0x%08X: 0x%02X -> 0x%02X (%s)', addr, original, newByte, patternName or 'manual'));
     
     return true;
 end
@@ -108,33 +119,53 @@ end
 local function searchAndPatch()
     local patchCount = 0;
     
-    -- Known patterns for level 99 comparisons in Job Points menu code
-    -- These patterns may vary by client version
-    
+    -- Known patterns for level 99 comparisons
+    -- These patterns include the conditional jump after the comparison for accuracy
     -- Pattern format: hex string where ?? = wildcard byte
     -- offset = position of 0x63 byte from pattern start
     local patterns = {
+        -- cmp byte ptr [reg+offset], 63h followed by conditional jump
         { pattern = '807E??6372', offset = 3, name = 'cmp [esi+off],63h; jb' },
         { pattern = '807E??6373', offset = 3, name = 'cmp [esi+off],63h; jnb' },
         { pattern = '807F??6372', offset = 3, name = 'cmp [edi+off],63h; jb' },
         { pattern = '807F??6373', offset = 3, name = 'cmp [edi+off],63h; jnb' },
+        { pattern = '807E??630F82', offset = 3, name = 'cmp [esi+off],63h; jb near' },
+        { pattern = '807E??630F83', offset = 3, name = 'cmp [esi+off],63h; jnb near' },
+        -- cmp al, 63h followed by conditional jump
         { pattern = '3C6372', offset = 1, name = 'cmp al,63h; jb' },
         { pattern = '3C6373', offset = 1, name = 'cmp al,63h; jnb' },
+        { pattern = '3C630F82', offset = 1, name = 'cmp al,63h; jb near' },
+        { pattern = '3C630F83', offset = 1, name = 'cmp al,63h; jnb near' },
+        -- cmp byte ptr [addr], 63h followed by conditional jump
         { pattern = '803D????????6372', offset = 6, name = 'cmp byte ptr [addr],63h; jb' },
         { pattern = '803D????????6373', offset = 6, name = 'cmp byte ptr [addr],63h; jnb' },
+        -- movzx then cmp pattern (common for level checks)
+        { pattern = '0FB6??3C6372', offset = 4, name = 'movzx; cmp al,63h; jb' },
+        { pattern = '0FB6??3C6373', offset = 4, name = 'movzx; cmp al,63h; jnb' },
     };
     
+    local patched = {}; -- Track addresses we've already patched
+    
     for _, p in ipairs(patterns) do
-        local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, 0);
-        if addr ~= 0 then
+        -- Search for all occurrences of this pattern
+        local count = 0;
+        local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+        
+        while addr ~= 0 and count < 20 do
             local patchAddr = addr + p.offset;
-            -- Verify the byte is actually 0x63 (99)
-            local currentByte = ashita.memory.read_uint8(patchAddr);
-            if currentByte == ORIGINAL_LEVEL then
-                applyPatch(patchAddr, TARGET_LEVEL);
-                debugPrint(string.format('Found pattern "%s" at 0x%08X', p.name, addr));
-                patchCount = patchCount + 1;
+            
+            -- Only patch if we haven't patched this address yet
+            if not patched[patchAddr] then
+                local currentByte = ashita.memory.read_uint8(patchAddr);
+                if currentByte == ORIGINAL_LEVEL then
+                    applyPatch(patchAddr, TARGET_LEVEL, p.name);
+                    patched[patchAddr] = true;
+                    patchCount = patchCount + 1;
+                end
             end
+            
+            count = count + 1;
+            addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
         end
     end
     
@@ -224,13 +255,14 @@ ashita.events.register('command', 'command_cb', function (e)
     
     if (#args == 1 or args[2]:lower() == 'help') then
         printMsg('Commands:');
-        printMsg('  /ujp status      - Show current patch status');
-        printMsg('  /ujp scan        - Scan for level check patterns');
-        printMsg('  /ujp patch <hex> - Manually patch address (e.g., /ujp patch 12345678)');
-        printMsg('  /ujp restore     - Restore all patches');
-        printMsg('  /ujp repatch     - Re-apply automatic patches');
-        printMsg('  /ujp read <hex>  - Read byte at address');
-        printMsg('  /ujp debug       - Toggle debug mode');
+        printMsg('  /ujp status       - Show current patch status');
+        printMsg('  /ujp scan         - Scan for level check patterns');
+        printMsg('  /ujp patch <hex>  - Manually patch address');
+        printMsg('  /ujp restore      - Restore all patches');
+        printMsg('  /ujp repatch      - Re-apply automatic patches');
+        printMsg('  /ujp test <num>   - Toggle patch #num to identify its purpose');
+        printMsg('  /ujp read <hex>   - Read byte at address');
+        printMsg('  /ujp debug        - Toggle debug mode');
         return;
     end
     
@@ -239,7 +271,11 @@ ashita.events.register('command', 'command_cb', function (e)
     if cmd == 'status' then
         printMsg(string.format('Active patches: %d', #state.patches));
         for i, p in ipairs(state.patches) do
-            printMsg(string.format('  %d: 0x%08X (was 0x%02X, now 0x%02X)', i, p.ptr, p.backup, TARGET_LEVEL));
+            local purpose = knownAddresses[p.ptr] or 'unknown';
+            printMsg(string.format('  %d: 0x%08X [%s] (%s)', i, p.ptr, p.pattern, purpose));
+        end
+        if #state.patches > 0 then
+            printMsg('Use /ujp test <num> to test individual patches.');
         end
         
     elseif cmd == 'scan' then
@@ -259,7 +295,7 @@ ashita.events.register('command', 'command_cb', function (e)
         end
         
         local currentByte = ashita.memory.read_uint8(addr);
-        applyPatch(addr, TARGET_LEVEL);
+        applyPatch(addr, TARGET_LEVEL, 'manual');
         printSuccess(string.format('Patched 0x%08X: 0x%02X -> 0x%02X', addr, currentByte, TARGET_LEVEL));
         
     elseif cmd == 'restore' then
@@ -274,6 +310,33 @@ ashita.events.register('command', 'command_cb', function (e)
             printSuccess(string.format('Re-applied %d patch(es).', count));
         else
             printError('Could not find patterns to patch.');
+        end
+        
+    elseif cmd == 'test' then
+        -- Toggle a specific patch to help identify what it does
+        if #args < 3 then
+            printError('Usage: /ujp test <patch_number>');
+            printMsg('Example: /ujp test 1');
+            return;
+        end
+        
+        local num = tonumber(args[3]);
+        if not num or num < 1 or num > #state.patches then
+            printError(string.format('Invalid patch number. Valid range: 1-%d', #state.patches));
+            return;
+        end
+        
+        local p = state.patches[num];
+        local currentByte = ashita.memory.read_uint8(p.ptr);
+        
+        if currentByte == TARGET_LEVEL then
+            -- Currently patched, restore original
+            ashita.memory.write_uint8(p.ptr, p.backup);
+            printMsg(string.format('Patch %d DISABLED (0x%08X now 0x%02X). Zone to test effect.', num, p.ptr, p.backup));
+        else
+            -- Currently original, apply patch
+            ashita.memory.write_uint8(p.ptr, TARGET_LEVEL);
+            printMsg(string.format('Patch %d ENABLED (0x%08X now 0x%02X). Zone to test effect.', num, p.ptr, TARGET_LEVEL));
         end
         
     elseif cmd == 'read' then
