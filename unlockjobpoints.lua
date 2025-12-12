@@ -387,6 +387,61 @@ state.gc = ffi.gc(ffi.cast('uint8_t*', 0), function()
 end);
 
 --[[
+* event: packet_in
+* desc : Intercept incoming packets to modify job points data
+*
+* Packet 0x063 is "miscdata" with various subtypes.
+* Subtype 0x05 is JobPoints data containing:
+*   - offset 0x08: access flag (1 byte)
+*   - offset 0x0A onwards: job data (6 bytes per job: capacityPoints, currentJp, totalJpSpent)
+*
+* We modify totalJpSpent to 1 for any job with 0 spent to enable it in the menu.
+--]]
+ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
+    -- Packet 0x063 = miscdata
+    if e.id == 0x0063 then
+        local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
+        local subtype = ptr[0x04];
+        
+        -- Subtype 0x05 = Job Points data
+        if subtype == 0x05 then
+            debugPrint(string.format('Intercepted Job Points packet (0x063 subtype 0x05)'));
+            
+            -- Job data starts at offset 0x0A (after header)
+            -- Each job: 6 bytes (capacityPoints u16, currentJp u16, totalJpSpent u16)
+            -- Jobs 1-22 (WAR to RUN), index 0 is unused
+            
+            local jobDataOffset = 0x0A;
+            local jobEntrySize = 6;
+            local totalJpSpentOffset = 4; -- offset within job entry
+            
+            local modified = 0;
+            for jobId = 1, 22 do
+                local entryOffset = jobDataOffset + (jobId * jobEntrySize);
+                local spentOffset = entryOffset + totalJpSpentOffset;
+                
+                -- Read current totalJpSpent (u16, little-endian)
+                local spentLow = ptr[spentOffset];
+                local spentHigh = ptr[spentOffset + 1];
+                local totalSpent = spentLow + (spentHigh * 256);
+                
+                if totalSpent == 0 then
+                    -- Set to 1 to enable the job in the menu
+                    ptr[spentOffset] = 1;
+                    ptr[spentOffset + 1] = 0;
+                    modified = modified + 1;
+                    debugPrint(string.format('  Job %d: totalJpSpent 0 -> 1', jobId));
+                end
+            end
+            
+            if modified > 0 then
+                debugPrint(string.format('Modified %d jobs in packet', modified));
+            end
+        end
+    end
+end);
+
+--[[
 * event: command
 * desc : Event called when the addon is processing a command.
 --]]
