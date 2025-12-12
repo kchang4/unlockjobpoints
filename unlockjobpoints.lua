@@ -451,33 +451,50 @@ end
 
 --[[
 * Scan for ALL level 99 references (aggressive search)
+* Returns table of results for potential patching
 --]]
-local function scanAll99()
+local function scanAll99(doPatch)
     printMsg('Scanning FFXiMain.dll for ALL level 99 (0x63) comparisons...');
-    printMsg('This may find many false positives. Look for patterns near JP menu code.');
+    if doPatch then
+        printMsg('Will patch all found patterns to 0x4B (75)...');
+    else
+        printMsg('This may find many false positives. Use /ujp patchscanall to patch them.');
+    end
 
     -- Very broad patterns - just looking for 0x63 in comparison contexts
     local patterns = {
         -- Any cmp byte with 0x63
-        { pattern = '80??63', offset = 2, name = 'cmp byte,63h' },
         { pattern = '3C63',   offset = 1, name = 'cmp al,63h' },
+        { pattern = '80F863', offset = 2, name = 'cmp al,63h (alt)' },
         { pattern = '80F963', offset = 2, name = 'cmp cl,63h' },
         { pattern = '80FA63', offset = 2, name = 'cmp dl,63h' },
+        { pattern = '80FB63', offset = 2, name = 'cmp bl,63h' },
         { pattern = '83F863', offset = 2, name = 'cmp eax,63h' },
         { pattern = '83F963', offset = 2, name = 'cmp ecx,63h' },
         { pattern = '83FA63', offset = 2, name = 'cmp edx,63h' },
+        { pattern = '83FB63', offset = 2, name = 'cmp ebx,63h' },
         { pattern = '83FE63', offset = 2, name = 'cmp esi,63h' },
         { pattern = '83FF63', offset = 2, name = 'cmp edi,63h' },
+        -- cmp byte ptr [reg+offset], 63h
+        { pattern = '807863', offset = 2, name = 'cmp [eax+?],63h' },
+        { pattern = '807963', offset = 2, name = 'cmp [ecx+?],63h' },
+        { pattern = '807A63', offset = 2, name = 'cmp [edx+?],63h' },
+        { pattern = '807B63', offset = 2, name = 'cmp [ebx+?],63h' },
+        { pattern = '807E63', offset = 2, name = 'cmp [esi+?],63h' },
+        { pattern = '807F63', offset = 2, name = 'cmp [edi+?],63h' },
     };
 
     local found = 0;
-    local results = {};
+    local patched = 0;
+    local alreadyPatched = {};
 
     for _, p in ipairs(patterns) do
         local count = 0;
         local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
 
-        while addr ~= 0 and count < 30 do
+        while addr ~= 0 and count < 50 do
+            local patchAddr = addr + p.offset;
+
             -- Check if this looks like a level check (followed by conditional jump)
             local nextByte = ashita.memory.read_uint8(addr + #p.pattern / 2);
             local isJump = (nextByte >= 0x70 and nextByte <= 0x7F) or (nextByte == 0x0F);
@@ -487,10 +504,20 @@ local function scanAll99()
                 context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
             end
 
-            if isJump then
-                printMsg(string.format('  [JUMP] %s at 0x%08X: %s', p.name, addr, context));
-            else
-                debugPrint(string.format('  [----] %s at 0x%08X: %s', p.name, addr, context));
+            -- Only process patterns followed by jumps (likely level checks)
+            if isJump and not alreadyPatched[patchAddr] then
+                local currentByte = ashita.memory.read_uint8(patchAddr);
+
+                if doPatch and currentByte == ORIGINAL_LEVEL then
+                    applyPatch(patchAddr, TARGET_LEVEL, p.name);
+                    printMsg(string.format('  PATCHED 0x%08X: %s - %s', patchAddr, p.name, context));
+                    patched = patched + 1;
+                else
+                    printMsg(string.format('  [JUMP] 0x%08X: %s - %s', patchAddr, p.name, context));
+                end
+                alreadyPatched[patchAddr] = true;
+            elseif not isJump then
+                debugPrint(string.format('  [----] 0x%08X: %s - %s', patchAddr, p.name, context));
             end
 
             found = found + 1;
@@ -499,8 +526,15 @@ local function scanAll99()
         end
     end
 
-    printMsg(string.format('Scan complete. Found %d patterns (showing those with jumps).', found));
-    printMsg('Enable debug mode to see all patterns: /ujp debug');
+    printMsg(string.format('Scan complete. Found %d patterns total.', found));
+    if doPatch then
+        printSuccess(string.format('Patched %d level 99 comparisons to 75.', patched));
+    else
+        printMsg('Enable debug mode to see non-jump patterns: /ujp debug');
+        printMsg('To patch all: /ujp patchscanall');
+    end
+
+    return patched;
 end
 
 --[[
@@ -809,7 +843,8 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('Commands:');
         printMsg('  /ujp status       - Show current patch status');
         printMsg('  /ujp scan         - Scan for level check patterns');
-        printMsg('  /ujp scanall      - Aggressive scan for ALL 99 comparisons');
+        printMsg('  /ujp scanall      - Scan for ALL 99 comparisons with jumps');
+        printMsg('  /ujp patchscanall - Patch ALL 99 comparisons found by scanall');
         printMsg('  /ujp nearjp       - Scan for 99 checks near JP menu code');
         printMsg('  /ujp rawscan      - Show ALL 0x63 bytes near JP menu');
         printMsg('  /ujp patchnear    - Patch all 99 checks near JP menu');
@@ -852,7 +887,10 @@ ashita.events.register('command', 'command_cb', function(e)
     elseif cmd == 'scan' then
         scanForPatterns();
     elseif cmd == 'scanall' then
-        scanAll99();
+        scanAll99(false); -- Scan only, don't patch
+    elseif cmd == 'patchscanall' then
+        -- Patch all patterns found by scanall (those followed by jumps)
+        scanAll99(true); -- Scan and patch
     elseif cmd == 'scanjobs' then
         scanForJobPatterns();
     elseif cmd == 'patchall' then
@@ -933,28 +971,28 @@ ashita.events.register('command', 'command_cb', function(e)
                 if prev1 == 0x3C then
                     isLikelyCompare = true;
                     patternType = 'cmp al,63h';
-                -- 80 FX 63 = cmp Xl, 63h
+                    -- 80 FX 63 = cmp Xl, 63h
                 elseif prev2 == 0x80 and prev1 >= 0xF8 and prev1 <= 0xFF then
                     isLikelyCompare = true;
-                    patternType = string.format('cmp %s,63h', 
-                        ({[0xF8]='al',[0xF9]='cl',[0xFA]='dl',[0xFB]='bl'})[prev1] or 'reg');
-                -- 83 FX 63 = cmp eXx, 63h
+                    patternType = string.format('cmp %s,63h',
+                        ({ [0xF8] = 'al', [0xF9] = 'cl', [0xFA] = 'dl', [0xFB] = 'bl' })[prev1] or 'reg');
+                    -- 83 FX 63 = cmp eXx, 63h
                 elseif prev2 == 0x83 and prev1 >= 0xF8 and prev1 <= 0xFF then
                     isLikelyCompare = true;
                     patternType = 'cmp e??,63h';
-                -- 80 7X YY 63 = cmp byte ptr [reg+YY], 63h
+                    -- 80 7X YY 63 = cmp byte ptr [reg+YY], 63h
                 elseif prev3 == 0x80 and prev2 >= 0x78 and prev2 <= 0x7F then
                     isLikelyCompare = true;
                     patternType = string.format('cmp [reg+%02X],63h', prev1);
-                -- 80 3X YY 63 = cmp byte ptr [reg+YY], 63h (different encoding)
+                    -- 80 3X YY 63 = cmp byte ptr [reg+YY], 63h (different encoding)
                 elseif prev3 == 0x80 and prev2 >= 0x38 and prev2 <= 0x3F then
                     isLikelyCompare = true;
                     patternType = 'cmp [reg],63h';
-                -- 80 7C XX YY 63 = cmp byte ptr [reg+reg*scale+off], 63h
+                    -- 80 7C XX YY 63 = cmp byte ptr [reg+reg*scale+off], 63h
                 elseif prev4 == 0x80 and prev3 == 0x7C then
                     isLikelyCompare = true;
                     patternType = 'cmp [reg+reg+off],63h';
-                -- 38 XX 63 or 3A XX 63 - cmp with memory operand
+                    -- 38 XX 63 or 3A XX 63 - cmp with memory operand
                 elseif prev2 == 0x38 or prev2 == 0x3A or prev2 == 0x3B then
                     isLikelyCompare = true;
                     patternType = 'cmp reg,mem';
@@ -979,9 +1017,9 @@ ashita.events.register('command', 'command_cb', function(e)
         -- Raw scan: show ALL 0x63 bytes near JP menu code
         local baseAddr = 0x045184F7;
         local searchRange = 0x2000;
-        
+
         printMsg(string.format('Raw scan for ALL 0x63 bytes near 0x%08X...', baseAddr));
-        
+
         local found = 0;
         for offset = -searchRange, searchRange do
             local addr = baseAddr + offset;
@@ -996,7 +1034,7 @@ ashita.events.register('command', 'command_cb', function(e)
                 found = found + 1;
             end
         end
-        
+
         printMsg(string.format('Found %d occurrences of 0x63.', found));
     elseif cmd == 'patchnear' then
         -- Patch ALL level 99 comparisons near the JP menu code
