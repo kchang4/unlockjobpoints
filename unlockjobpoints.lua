@@ -815,15 +815,13 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('  /ujp scan         - Scan for level check patterns');
         printMsg('  /ujp scanall      - Scan for ALL 99 comparisons with jumps');
         printMsg('  /ujp patchscanall - Patch ALL 99 comparisons found by scanall');
-        printMsg('  /ujp nearjp       - Scan for 99 checks near JP menu code');
-        printMsg('  /ujp rawscan      - Show ALL 0x63 bytes near JP menu');
-        printMsg('  /ujp patchnear    - Patch all 99 checks near JP menu');
-        printMsg('  /ujp patchall     - Aggressively patch ALL 99 comparisons');
         printMsg('  /ujp patch <hex>  - Manually patch address');
         printMsg('  /ujp restore      - Restore all patches');
         printMsg('  /ujp repatch      - Re-apply automatic patches');
-        printMsg('  /ujp test <num>   - Toggle patch #num to identify its purpose');
+        printMsg('  /ujp test <num>   - Toggle patch #num');
+        printMsg('  /ujp toggle <hex> - Toggle address between 0x63/0x4B');
         printMsg('  /ujp read <hex>   - Read byte at address');
+        printMsg('  /ujp base         - Show DLL base and RVAs');
         printMsg('  /ujp debug        - Toggle debug mode');
         return;
     end
@@ -1127,6 +1125,61 @@ ashita.events.register('command', 'command_cb', function(e)
 
         local byte = ashita.memory.read_uint8(addr);
         printMsg(string.format('0x%08X = 0x%02X (%d)', addr, byte, byte));
+    elseif cmd == 'toggle' then
+        -- Toggle a specific address between 0x63 and 0x4B
+        -- Usage: /ujp toggle <address>
+        if #args < 3 then
+            printError('Usage: /ujp toggle <address>');
+            printError('Example: /ujp toggle 04627350');
+            return;
+        end
+
+        local addr = tonumber(args[3], 16);
+        if not addr or addr == 0 then
+            printError('Invalid address: ' .. args[3]);
+            return;
+        end
+
+        local currentByte = ashita.memory.read_uint8(addr);
+        if currentByte == TARGET_LEVEL then
+            -- Currently 0x4B (75), set back to 0x63 (99)
+            ashita.memory.write_uint8(addr, ORIGINAL_LEVEL);
+            printMsg(string.format('0x%08X: 0x4B -> 0x63 (DISABLED)', addr));
+        elseif currentByte == ORIGINAL_LEVEL then
+            -- Currently 0x63 (99), set to 0x4B (75)
+            ashita.memory.write_uint8(addr, TARGET_LEVEL);
+            printMsg(string.format('0x%08X: 0x63 -> 0x4B (ENABLED)', addr));
+        else
+            printError(string.format('0x%08X has unexpected value 0x%02X (expected 0x63 or 0x4B)', addr, currentByte));
+        end
+    elseif cmd == 'base' then
+        -- Show the FFXiMain.dll base address
+        local baseAddr = ashita.memory.find('FFXiMain.dll', 0, '4D5A', 0, 0); -- MZ header
+        if baseAddr and baseAddr ~= 0 then
+            -- Search backwards for the actual base
+            -- The find returns the pattern location, but we want the module base
+            printMsg('Searching for FFXiMain.dll base...');
+            -- Use a simple pattern at the start of .text section
+            local textStart = ashita.memory.find('FFXiMain.dll', 0, '558BEC', 0, 0);
+            if textStart and textStart ~= 0 then
+                -- Estimate base by rounding down to 64KB boundary
+                local estimatedBase = bit.band(textStart, 0xFFFF0000);
+                printMsg(string.format('Estimated FFXiMain.dll base: 0x%08X', estimatedBase));
+                printMsg(string.format('First code found at: 0x%08X', textStart));
+
+                -- Show relative offsets for our patches
+                if #state.patches > 0 then
+                    printMsg('Relative offsets for current patches:');
+                    for i, p in ipairs(state.patches) do
+                        local addr = p.ptr or p.address or 0;
+                        local rva = addr - estimatedBase;
+                        printMsg(string.format('  %d: RVA 0x%08X (addr 0x%08X)', i, rva, addr));
+                    end
+                end
+            end
+        else
+            printError('Could not find FFXiMain.dll');
+        end
     elseif cmd == 'debug' then
         state.debug = not state.debug;
         printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
@@ -1370,3 +1423,4 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('Use /ujp help for command list.');
     end
 end);
+
