@@ -74,11 +74,11 @@ local state = {
 local knownAddresses = {
     -- Identified patches (addresses may vary by client version):
     [0x045184F7] = 'Job Points Menu Main Check',
-    [0x046D84F7] = 'Job Points Menu Main Check (alt)',  -- Same offset, different base
+    [0x046D84F7] = 'Job Points Menu Main Check (alt)', -- Same offset, different base
     [0x0459A605] = 'Level Check',
-    [0x0475A605] = 'Level Check (alt)',  -- Same offset, different base
+    [0x0475A605] = 'Level Check (alt)',                -- Same offset, different base
     [0x047338F9] = 'Level Check',
-    [0x046D9BA6] = 'Per-Job Level Check',  -- THE KEY ONE for enabling individual jobs!
+    [0x046D9BA6] = 'Per-Job Level Check',              -- THE KEY ONE for enabling individual jobs!
 };
 
 --[[
@@ -229,22 +229,22 @@ local function searchAndPatch()
         -- Pattern is "3C 63" (cmp al, 63h) - we patch the 0x63 byte
         { search = '3C63', name = 'Per-Job Level Check', expectedContext = 'cmp al,63h' },
     };
-    
+
     -- Search for the per-job check pattern and patch all occurrences
     for _, critical in ipairs(criticalAddresses) do
         local count = 0;
         local addr = ashita.memory.find('FFXiMain.dll', 0, critical.search, 0, count);
-        
+
         while addr ~= 0 and count < 100 do
-            local patchAddr = addr + 1;  -- The 0x63 is at offset 1 in "3C 63"
+            local patchAddr = addr + 1; -- The 0x63 is at offset 1 in "3C 63"
             local currentByte = ashita.memory.read_uint8(patchAddr);
-            
+
             if currentByte == ORIGINAL_LEVEL and not patched[patchAddr] then
                 applyPatch(patchAddr, TARGET_LEVEL, critical.name);
                 patched[patchAddr] = true;
                 patchCount = patchCount + 1;
             end
-            
+
             count = count + 1;
             addr = ashita.memory.find('FFXiMain.dll', 0, critical.search, 0, count);
         end
@@ -1096,12 +1096,12 @@ ashita.events.register('command', 'command_cb', function(e)
         local p = state.patches[num];
         local addr = p.ptr or p.address;
         local backup = p.backup or p.original;
-        
+
         if not addr or not backup then
             printError('Invalid patch data at index ' .. num);
             return;
         end
-        
+
         local currentByte = ashita.memory.read_uint8(addr);
 
         if currentByte == TARGET_LEVEL then
