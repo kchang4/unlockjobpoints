@@ -62,11 +62,11 @@ local jobNames = {
 
 -- Addon state
 local state = {
-    patches = {}, -- Array of {ptr=address, backup=original_byte, pattern=name}
-    gc = nil,     -- Garbage collector for cleanup
+    patches = {},          -- Array of {ptr=address, backup=original_byte, pattern=name}
+    gc = nil,              -- Garbage collector for cleanup
     debug = false,
-    jobLevelsAddr = nil, -- Address of the job levels array in memory
-    autoSetLevels = true, -- Automatically set all job levels to 99
+    jobLevelsAddr = nil,   -- Address of the job levels array in memory (DEPRECATED - causes visual bug)
+    autoSetLevels = false, -- DISABLED - causes visual bug showing Lv.99
 };
 
 -- Known working addresses for specific client versions
@@ -108,21 +108,21 @@ local function findJobLevelsAddress()
     if not player then
         return nil;
     end
-    
+
     -- Build a search pattern from current job levels (jobs 1-10)
     local patternStr = '';
     for jobId = 1, 10 do
         local level = player:GetJobLevel(jobId);
         patternStr = patternStr .. string.format('%02X', level);
     end
-    
+
     -- Search in FFXiMain.dll
     local addr = ashita.memory.find('FFXiMain.dll', 0, patternStr, 0, 0);
     if addr ~= 0 then
         -- The pattern starts at job 1, so subtract 1 to get base (job 0)
         return addr - 1;
     end
-    
+
     return nil;
 end
 
@@ -145,7 +145,7 @@ local function setAllJobLevels99(silent)
             debugPrint(string.format('Found job levels at 0x%08X', state.jobLevelsAddr));
         end
     end
-    
+
     local modified = 0;
     for i = 0, 22 do
         local current = ashita.memory.read_uint8(state.jobLevelsAddr + i);
@@ -154,11 +154,11 @@ local function setAllJobLevels99(silent)
             modified = modified + 1;
         end
     end
-    
+
     if modified > 0 and not silent then
         debugPrint(string.format('Set %d job levels to 99', modified));
     end
-    
+
     return modified;
 end
 
@@ -564,7 +564,7 @@ ashita.events.register('load', 'load_cb', function()
     else
         printMsg('No per-job patches applied (may not be needed or patterns not found).');
     end
-    
+
     -- Try to find the job levels address and set all to 99
     if state.autoSetLevels then
         state.jobLevelsAddr = findJobLevelsAddress();
@@ -669,7 +669,7 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
             ptr[0x0F] = 99;
             printMsg(string.format('  -> Set sub job level (%d -> 99)', subJobLevel));
         end
-        
+
         -- After packet processing, re-apply level 99 to client's cached job levels
         -- The packet will have overwritten our previous modifications
         if state.autoSetLevels then
@@ -808,24 +808,18 @@ ashita.events.register('command', 'command_cb', function(e)
     if (#args == 1 or args[2]:lower() == 'help') then
         printMsg('Commands:');
         printMsg('  /ujp status       - Show current patch status');
-        printMsg('  /ujp auto         - Toggle auto-set job levels (currently ' .. (state.autoSetLevels and 'ON' or 'OFF') .. ')');
         printMsg('  /ujp scan         - Scan for level check patterns');
         printMsg('  /ujp scanall      - Aggressive scan for ALL 99 comparisons');
         printMsg('  /ujp scanjobs     - Scan for per-job enable patterns');
-        printMsg('  /ujp dumpjobs     - Show player job levels from API');
-        printMsg('  /ujp setjobs99    - Search for job level memory and set to 99');
-        printMsg('  /ujp forcelvl99 <addr> - Force job levels to 99 at address');
-        printMsg('  /ujp scanjobmem   - Scan for job level arrays in memory');
-        printMsg('  /ujp findjpdata   - Search for JP data references');
-        printMsg('  /ujp watchmem <addr> <len> - Dump memory region');
-        printMsg('  /ujp patch <hex>  - Manually patch address');
+        printMsg('  /ujp nearjp       - Scan for 99 checks near JP menu code');
+        printMsg('  /ujp patchnear    - Patch all 99 checks near JP menu');
         printMsg('  /ujp patchall     - Aggressively patch ALL 99 comparisons');
+        printMsg('  /ujp patch <hex>  - Manually patch address');
         printMsg('  /ujp restore      - Restore all patches');
         printMsg('  /ujp repatch      - Re-apply automatic patches');
         printMsg('  /ujp test <num>   - Toggle patch #num to identify its purpose');
         printMsg('  /ujp read <hex>   - Read byte at address');
         printMsg('  /ujp debug        - Toggle debug mode');
-        printMsg('  /ujp request      - Request JP data from server (triggers packet)');
         return;
     end
 
@@ -834,7 +828,8 @@ ashita.events.register('command', 'command_cb', function(e)
     if cmd == 'status' then
         printMsg(string.format('Active patches: %d', #state.patches));
         printMsg(string.format('Auto-set job levels: %s', state.autoSetLevels and 'ON' or 'OFF'));
-        printMsg(string.format('Job levels address: %s', state.jobLevelsAddr and string.format('0x%08X', state.jobLevelsAddr) or 'not found'));
+        printMsg(string.format('Job levels address: %s',
+            state.jobLevelsAddr and string.format('0x%08X', state.jobLevelsAddr) or 'not found'));
         printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
         if #state.patches > 0 then
             printMsg('Patches:');
@@ -904,6 +899,119 @@ ashita.events.register('command', 'command_cb', function(e)
 
         printSuccess(string.format('Patched %d additional level 99 comparisons.', totalCount));
         printMsg('Now try opening the Job Points menu.');
+    elseif cmd == 'nearjp' then
+        -- Search for level 99 comparisons near the known JP menu address
+        -- The per-job check is likely in the same function or nearby
+        local baseAddr = 0x045184F7; -- Known JP menu address
+        local searchRange = 0x2000;  -- Search ±8KB around this address
+
+        printMsg(string.format('Searching for level 99 (0x63) bytes near 0x%08X...', baseAddr));
+
+        local found = 0;
+        for offset = -searchRange, searchRange do
+            local addr = baseAddr + offset;
+            local byte = ashita.memory.read_uint8(addr);
+
+            if byte == 0x63 then
+                -- Read context around this address
+                local context = '';
+                for i = -4, 8 do
+                    context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
+                end
+
+                -- Check if this looks like a comparison
+                local prevByte = ashita.memory.read_uint8(addr - 1);
+                local prev2Byte = ashita.memory.read_uint8(addr - 2);
+                local nextByte = ashita.memory.read_uint8(addr + 1);
+
+                -- Look for patterns like: cmp X, 63h or comparison + jump
+                local isLikelyCompare = false;
+                local patternType = '';
+
+                -- 3C 63 = cmp al, 63h
+                if prev2Byte == 0x3C then
+                    isLikelyCompare = true;
+                    patternType = 'cmp al,63h';
+                    -- 80 F9 63 = cmp cl, 63h
+                elseif prevByte == 0xF9 and prev2Byte == 0x80 then
+                    isLikelyCompare = true;
+                    patternType = 'cmp cl,63h';
+                    -- 83 F8 63 = cmp eax, 63h
+                elseif prevByte == 0xF8 and prev2Byte == 0x83 then
+                    isLikelyCompare = true;
+                    patternType = 'cmp eax,63h';
+                    -- 80 7E XX 63 = cmp byte ptr [esi+XX], 63h
+                elseif prevByte >= 0x00 and prevByte <= 0xFF and prev2Byte == 0x7E and ashita.memory.read_uint8(addr - 3) == 0x80 then
+                    isLikelyCompare = true;
+                    patternType = string.format('cmp [esi+%02X],63h', prevByte);
+                    -- 80 7C XX YY 63 = cmp byte ptr [reg+reg+YY], 63h (scaled access)
+                elseif ashita.memory.read_uint8(addr - 4) == 0x80 and ashita.memory.read_uint8(addr - 3) == 0x7C then
+                    isLikelyCompare = true;
+                    patternType = 'cmp [reg+reg+off],63h';
+                    -- Check for any 80 7X patterns (cmp byte ptr)
+                elseif prev2Byte == 0x80 and (ashita.memory.read_uint8(addr - 3) >= 0x78 and ashita.memory.read_uint8(addr - 3) <= 0x7F) then
+                    isLikelyCompare = true;
+                    patternType = 'cmp [reg+off],63h';
+                end
+
+                -- Check if next byte is a jump instruction
+                local isJump = (nextByte >= 0x70 and nextByte <= 0x7F) or nextByte == 0x0F;
+
+                if isLikelyCompare then
+                    local jumpStr = isJump and ' [JUMP]' or '';
+                    printMsg(string.format('  0x%08X: %s%s - %s', addr, patternType, jumpStr, context));
+                    found = found + 1;
+                end
+            end
+        end
+
+        printMsg(string.format('Found %d potential level 99 comparisons near JP menu code.', found));
+    elseif cmd == 'patchnear' then
+        -- Patch ALL level 99 comparisons near the JP menu code
+        local baseAddr = 0x045184F7;
+        local searchRange = 0x2000;
+
+        printMsg(string.format('Patching all level 99 comparisons near 0x%08X...', baseAddr));
+
+        local patched = 0;
+        for offset = -searchRange, searchRange do
+            local addr = baseAddr + offset;
+            local byte = ashita.memory.read_uint8(addr);
+
+            if byte == 0x63 then
+                local prevByte = ashita.memory.read_uint8(addr - 1);
+                local prev2Byte = ashita.memory.read_uint8(addr - 2);
+                local prev3Byte = ashita.memory.read_uint8(addr - 3);
+
+                local isLikelyCompare = false;
+
+                -- 3C 63 = cmp al, 63h
+                if prev2Byte == 0x3C then
+                    isLikelyCompare = true;
+                    -- 80 FX 63 = cmp Xl, 63h
+                elseif prev2Byte == 0x80 and (prevByte >= 0xF8 and prevByte <= 0xFF) then
+                    isLikelyCompare = true;
+                    -- 83 FX 63 = cmp eXx, 63h
+                elseif prev2Byte == 0x83 and (prevByte >= 0xF8 and prevByte <= 0xFF) then
+                    isLikelyCompare = true;
+                    -- 80 7X XX 63 = cmp byte ptr [reg+XX], 63h
+                elseif prev3Byte == 0x80 and (prev2Byte >= 0x78 and prev2Byte <= 0x7F) then
+                    isLikelyCompare = true;
+                    -- 80 7C XX YY 63 = cmp byte ptr [reg+reg*scale+off], 63h
+                elseif ashita.memory.read_uint8(addr - 4) == 0x80 and prev3Byte == 0x7C then
+                    isLikelyCompare = true;
+                end
+
+                if isLikelyCompare then
+                    applyPatch(addr, TARGET_LEVEL, 'nearjp');
+                    patched = patched + 1;
+                    printMsg(string.format('  Patched 0x%08X: 0x63 -> 0x4B', addr));
+                end
+            end
+        end
+
+        printSuccess(string.format('Patched %d level 99 comparisons near JP menu.', patched));
+        printMsg('Now reload the addon and test the JP menu.');
     elseif cmd == 'patch' then
         if #args < 3 then
             printError('Usage: /ujp patch <address>');
