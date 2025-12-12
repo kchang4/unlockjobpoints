@@ -36,11 +36,28 @@ local ORIGINAL_LEVEL = 0x63; -- 99 in hex
 -- Job name lookup table
 local jobNames = {
     [0] = 'NON',
-    [1] = 'WAR', [2] = 'MNK', [3] = 'WHM', [4] = 'BLM', [5] = 'RDM',
-    [6] = 'THF', [7] = 'PLD', [8] = 'DRK', [9] = 'BST', [10] = 'BRD',
-    [11] = 'RNG', [12] = 'SAM', [13] = 'NIN', [14] = 'DRG', [15] = 'SMN',
-    [16] = 'BLU', [17] = 'COR', [18] = 'PUP', [19] = 'DNC', [20] = 'SCH',
-    [21] = 'GEO', [22] = 'RUN',
+    [1] = 'WAR',
+    [2] = 'MNK',
+    [3] = 'WHM',
+    [4] = 'BLM',
+    [5] = 'RDM',
+    [6] = 'THF',
+    [7] = 'PLD',
+    [8] = 'DRK',
+    [9] = 'BST',
+    [10] = 'BRD',
+    [11] = 'RNG',
+    [12] = 'SAM',
+    [13] = 'NIN',
+    [14] = 'DRG',
+    [15] = 'SMN',
+    [16] = 'BLU',
+    [17] = 'COR',
+    [18] = 'PUP',
+    [19] = 'DNC',
+    [20] = 'SCH',
+    [21] = 'GEO',
+    [22] = 'RUN',
 };
 
 -- Addon state
@@ -48,6 +65,8 @@ local state = {
     patches = {}, -- Array of {ptr=address, backup=original_byte, pattern=name}
     gc = nil,     -- Garbage collector for cleanup
     debug = false,
+    jobLevelsAddr = nil, -- Address of the job levels array in memory
+    autoSetLevels = true, -- Automatically set all job levels to 99
 };
 
 -- Known working addresses for specific client versions
@@ -78,6 +97,69 @@ local function debugPrint(msg)
     if state.debug then
         print(chat.header(addon.name):append(chat.color1(6, '[DEBUG] ' .. msg)));
     end
+end
+
+--[[
+* Find the job levels array in memory by searching for a pattern
+* @return {number|nil} - Address if found, nil otherwise
+--]]
+local function findJobLevelsAddress()
+    local player = AshitaCore:GetMemoryManager():GetPlayer();
+    if not player then
+        return nil;
+    end
+    
+    -- Build a search pattern from current job levels (jobs 1-10)
+    local patternStr = '';
+    for jobId = 1, 10 do
+        local level = player:GetJobLevel(jobId);
+        patternStr = patternStr .. string.format('%02X', level);
+    end
+    
+    -- Search in FFXiMain.dll
+    local addr = ashita.memory.find('FFXiMain.dll', 0, patternStr, 0, 0);
+    if addr ~= 0 then
+        -- The pattern starts at job 1, so subtract 1 to get base (job 0)
+        return addr - 1;
+    end
+    
+    return nil;
+end
+
+--[[
+* Set all job levels to 99 at the stored address
+* @param {boolean} silent - If true, don't print messages
+* @return {number} - Number of jobs modified
+--]]
+local function setAllJobLevels99(silent)
+    if not state.jobLevelsAddr then
+        -- Try to find it
+        state.jobLevelsAddr = findJobLevelsAddress();
+        if not state.jobLevelsAddr then
+            if not silent then
+                printError('Job levels address not found. Use /ujp setjobs99 first.');
+            end
+            return 0;
+        end
+        if not silent then
+            debugPrint(string.format('Found job levels at 0x%08X', state.jobLevelsAddr));
+        end
+    end
+    
+    local modified = 0;
+    for i = 0, 22 do
+        local current = ashita.memory.read_uint8(state.jobLevelsAddr + i);
+        if current > 0 and current < 99 then
+            ashita.memory.write_uint8(state.jobLevelsAddr + i, 99);
+            modified = modified + 1;
+        end
+    end
+    
+    if modified > 0 and not silent then
+        debugPrint(string.format('Set %d job levels to 99', modified));
+    end
+    
+    return modified;
 end
 
 --[[
@@ -482,7 +564,21 @@ ashita.events.register('load', 'load_cb', function()
     else
         printMsg('No per-job patches applied (may not be needed or patterns not found).');
     end
+    
+    -- Try to find the job levels address and set all to 99
+    if state.autoSetLevels then
+        state.jobLevelsAddr = findJobLevelsAddress();
+        if state.jobLevelsAddr then
+            local modified = setAllJobLevels99(true);
+            if modified > 0 then
+                printSuccess(string.format('Auto-set %d job levels to 99 (addr: 0x%08X)', modified, state.jobLevelsAddr));
+            end
+        else
+            printMsg('Job levels address not found yet. Will try after packets arrive.');
+        end
+    end
 
+    printMsg('Auto-set job levels: ' .. (state.autoSetLevels and 'ON' or 'OFF'));
     printMsg('Commands: /ujp help');
 end);
 
@@ -572,6 +668,18 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
         if subJobLevel > 0 and subJobLevel < 99 then
             ptr[0x0F] = 99;
             printMsg(string.format('  -> Set sub job level (%d -> 99)', subJobLevel));
+        end
+        
+        -- After packet processing, re-apply level 99 to client's cached job levels
+        -- The packet will have overwritten our previous modifications
+        if state.autoSetLevels then
+            -- Use a short delay to let the packet finish processing
+            ashita.tasks.once(0.1, function()
+                local modified = setAllJobLevels99(true);
+                if modified > 0 then
+                    debugPrint(string.format('Auto-set %d job levels to 99 after packet', modified));
+                end
+            end);
         end
     end
 
@@ -700,6 +808,7 @@ ashita.events.register('command', 'command_cb', function(e)
     if (#args == 1 or args[2]:lower() == 'help') then
         printMsg('Commands:');
         printMsg('  /ujp status       - Show current patch status');
+        printMsg('  /ujp auto         - Toggle auto-set job levels (currently ' .. (state.autoSetLevels and 'ON' or 'OFF') .. ')');
         printMsg('  /ujp scan         - Scan for level check patterns');
         printMsg('  /ujp scanall      - Aggressive scan for ALL 99 comparisons');
         printMsg('  /ujp scanjobs     - Scan for per-job enable patterns');
@@ -724,12 +833,26 @@ ashita.events.register('command', 'command_cb', function(e)
 
     if cmd == 'status' then
         printMsg(string.format('Active patches: %d', #state.patches));
-        for i, p in ipairs(state.patches) do
-            local purpose = knownAddresses[p.ptr] or 'unknown';
-            printMsg(string.format('  %d: 0x%08X [%s] (%s)', i, p.ptr, p.pattern, purpose));
-        end
+        printMsg(string.format('Auto-set job levels: %s', state.autoSetLevels and 'ON' or 'OFF'));
+        printMsg(string.format('Job levels address: %s', state.jobLevelsAddr and string.format('0x%08X', state.jobLevelsAddr) or 'not found'));
+        printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
         if #state.patches > 0 then
+            printMsg('Patches:');
+            for i, p in ipairs(state.patches) do
+                local purpose = knownAddresses[p.ptr] or 'unknown';
+                printMsg(string.format('  %d: 0x%08X [%s] (%s)', i, p.ptr, p.pattern, purpose));
+            end
             printMsg('Use /ujp test <num> to test individual patches.');
+        end
+    elseif cmd == 'auto' then
+        state.autoSetLevels = not state.autoSetLevels;
+        printMsg(string.format('Auto-set job levels: %s', state.autoSetLevels and 'ON' or 'OFF'));
+        if state.autoSetLevels then
+            -- Apply immediately
+            local modified = setAllJobLevels99(false);
+            if modified > 0 then
+                printSuccess(string.format('Set %d job levels to 99', modified));
+            end
         end
     elseif cmd == 'scan' then
         scanForPatterns();
@@ -740,9 +863,9 @@ ashita.events.register('command', 'command_cb', function(e)
     elseif cmd == 'patchall' then
         -- Aggressively patch ALL level 99 comparisons in FFXiMain.dll
         printMsg('Aggressively patching ALL level 99 comparisons...');
-        
+
         local patterns = {
-            { pattern = '3C63', offset = 1, name = 'cmp al,63h' },
+            { pattern = '3C63',   offset = 1, name = 'cmp al,63h' },
             { pattern = '80F963', offset = 2, name = 'cmp cl,63h' },
             { pattern = '80FA63', offset = 2, name = 'cmp dl,63h' },
             { pattern = '80FB63', offset = 2, name = 'cmp bl,63h' },
@@ -753,17 +876,17 @@ ashita.events.register('command', 'command_cb', function(e)
             { pattern = '83FE63', offset = 2, name = 'cmp esi,63h' },
             { pattern = '83FF63', offset = 2, name = 'cmp edi,63h' },
         };
-        
+
         local patched = {};
         local totalCount = 0;
-        
+
         for _, p in ipairs(patterns) do
             local count = 0;
             local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
-            
+
             while addr ~= 0 and count < 50 do
                 local patchAddr = addr + p.offset;
-                
+
                 if not patched[patchAddr] then
                     local currentByte = ashita.memory.read_uint8(patchAddr);
                     if currentByte == ORIGINAL_LEVEL then
@@ -773,12 +896,12 @@ ashita.events.register('command', 'command_cb', function(e)
                         printMsg(string.format('  Patched 0x%08X (%s)', patchAddr, p.name));
                     end
                 end
-                
+
                 count = count + 1;
                 addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
             end
         end
-        
+
         printSuccess(string.format('Patched %d additional level 99 comparisons.', totalCount));
         printMsg('Now try opening the Job Points menu.');
     elseif cmd == 'patch' then
@@ -875,7 +998,7 @@ ashita.events.register('command', 'command_cb', function(e)
         -- The data is structured as: capacityPoints(u16), currentJp(u16), totalJpSpent(u16) per job
         -- Total: 6 bytes per job, 23 jobs (0-22)
         printMsg('Searching for player job levels in memory...');
-        
+
         -- Try to get player data from Ashita memory manager
         local player = AshitaCore:GetMemoryManager():GetPlayer();
         if player then
@@ -887,7 +1010,7 @@ ashita.events.register('command', 'command_cb', function(e)
                     printMsg(string.format('  %s (job %d): Level %d', name, jobId, level));
                 end
             end
-            
+
             printMsg('');
             printMsg('Main job: ' .. (jobNames[player:GetMainJob()] or '?') .. ' Lv.' .. player:GetMainJobLevel());
             printMsg('Sub job: ' .. (jobNames[player:GetSubJob()] or '?') .. ' Lv.' .. player:GetSubJobLevel());
@@ -898,7 +1021,7 @@ ashita.events.register('command', 'command_cb', function(e)
         -- Try to set all job levels to 99 in client memory
         -- This is a more direct approach than packet modification
         printMsg('Attempting to set job levels to 99 in client memory...');
-        
+
         -- The Ashita API is read-only, so we need to find the actual memory location
         -- Look for the pattern of job levels based on what we see from the API
         local player = AshitaCore:GetMemoryManager():GetPlayer();
@@ -906,7 +1029,7 @@ ashita.events.register('command', 'command_cb', function(e)
             printError('Could not get player object');
             return;
         end
-        
+
         -- Get current job levels to form a search pattern
         local levels = {};
         local patternStr = '';
@@ -915,14 +1038,14 @@ ashita.events.register('command', 'command_cb', function(e)
             table.insert(levels, level);
             patternStr = patternStr .. string.format('%02X', level);
         end
-        
+
         printMsg('Searching for job level pattern: ' .. patternStr);
-        
+
         -- Search FFXiMain.dll data sections for this pattern
         local addr = ashita.memory.find('FFXiMain.dll', 0, patternStr, 0, 0);
         if addr ~= 0 then
             printMsg(string.format('Found job levels at 0x%08X', addr));
-            
+
             -- Read and display current values
             printMsg('Current values:');
             for i = 0, 22 do
@@ -932,7 +1055,7 @@ ashita.events.register('command', 'command_cb', function(e)
                     printMsg(string.format('  +%02X: %s = %d', i, name, jobLevel));
                 end
             end
-            
+
             printMsg('');
             printMsg('To set all to 99, run: /ujp forcelvl99 ' .. string.format('%08X', addr));
         else
@@ -946,15 +1069,15 @@ ashita.events.register('command', 'command_cb', function(e)
             printMsg('Use /ujp setjobs99 first to find the address');
             return;
         end
-        
+
         local addr = tonumber(args[3], 16);
         if not addr or addr == 0 then
             printError('Invalid address: ' .. args[3]);
             return;
         end
-        
+
         printMsg(string.format('Setting all job levels to 99 at 0x%08X...', addr));
-        
+
         -- Save backups and write 99 to each job slot
         for i = 0, 22 do
             local backup = ashita.memory.read_uint8(addr + i);
@@ -963,14 +1086,14 @@ ashita.events.register('command', 'command_cb', function(e)
                 printMsg(string.format('  Job %d: %d -> 99', i, backup));
             end
         end
-        
+
         printSuccess('Job levels set to 99. Check JP menu now!');
         printMsg('Note: This change may be overwritten by incoming packets.');
     elseif cmd == 'scanjobmem' then
         -- Scan for where job levels might be stored
         -- Look for patterns like: multiple consecutive bytes with values in range 1-99
         printMsg('Scanning for potential job level arrays in FFXiMain.dll...');
-        
+
         -- The player likely has SMN 75, so look for 0x4B at position 15
         -- Combined with other known job levels
         local player = AshitaCore:GetMemoryManager():GetPlayer();
@@ -978,7 +1101,7 @@ ashita.events.register('command', 'command_cb', function(e)
             printError('Could not get player object');
             return;
         end
-        
+
         -- Build pattern for jobs 12-16 (SAM, NIN, DRG, SMN, BLU)
         -- These are close together in memory
         local pattern = '';
@@ -988,20 +1111,20 @@ ashita.events.register('command', 'command_cb', function(e)
             pattern = pattern .. string.format('%02X', level);
             patternJobs = patternJobs .. string.format(' %d=%d', jobId, level);
         end
-        
+
         printMsg('Searching for pattern:' .. patternJobs);
         printMsg('Pattern hex: ' .. pattern);
-        
+
         local count = 0;
         local addr = ashita.memory.find('FFXiMain.dll', 0, pattern, 0, count);
-        
+
         while addr ~= 0 and count < 20 do
             printMsg(string.format('Found at 0x%08X', addr));
-            
+
             -- Calculate base address (subtract offset for job 12)
             local baseAddr = addr - 12;
             printMsg(string.format('  Potential base: 0x%08X', baseAddr));
-            
+
             -- Read surrounding context
             printMsg('  Context around match:');
             for i = -4, 20 do
@@ -1010,11 +1133,11 @@ ashita.events.register('command', 'command_cb', function(e)
                 if i == 0 then marker = ' <-- match start'; end
                 printMsg(string.format('    +%02d: 0x%02X (%3d)%s', i, byte, byte, marker));
             end
-            
+
             count = count + 1;
             addr = ashita.memory.find('FFXiMain.dll', 0, pattern, 0, count);
         end
-        
+
         if count == 0 then
             printMsg('No matches found.');
         end
