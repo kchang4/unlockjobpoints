@@ -33,6 +33,16 @@ local ffi = require('ffi');
 local TARGET_LEVEL = 0x4B;   -- 75 in hex
 local ORIGINAL_LEVEL = 0x63; -- 99 in hex
 
+-- Job name lookup table
+local jobNames = {
+    [0] = 'NON',
+    [1] = 'WAR', [2] = 'MNK', [3] = 'WHM', [4] = 'BLM', [5] = 'RDM',
+    [6] = 'THF', [7] = 'PLD', [8] = 'DRK', [9] = 'BST', [10] = 'BRD',
+    [11] = 'RNG', [12] = 'SAM', [13] = 'NIN', [14] = 'DRG', [15] = 'SMN',
+    [16] = 'BLU', [17] = 'COR', [18] = 'PUP', [19] = 'DNC', [20] = 'SCH',
+    [21] = 'GEO', [22] = 'RUN',
+};
+
 -- Addon state
 local state = {
     patches = {}, -- Array of {ptr=address, backup=original_byte, pattern=name}
@@ -635,39 +645,39 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
         local jobPointCount = (e.size / 4) - 1;
 
         debugPrint(string.format('*** Received Job Points CATEGORIES packet (0x08D), entries: %d ***', jobPointCount));
-        
+
         -- Dump first few entries to understand structure
         if state.debug then
             for i = 0, math.min(7, jobPointCount - 1) do
                 local offset = 4 + (i * 4);
-                local b0, b1, b2, b3 = ptr[offset], ptr[offset+1], ptr[offset+2], ptr[offset+3];
+                local b0, b1, b2, b3 = ptr[offset], ptr[offset + 1], ptr[offset + 2], ptr[offset + 3];
                 debugPrint(string.format('  Entry %d: %02X %02X %02X %02X', i, b0, b1, b2, b3));
             end
         end
-        
+
         -- The structure per tCrossBar (big-endian bit unpacking):
         -- bits 0-4: index (category index within job, 0-31)
         -- bits 5-15: job (job ID)
         -- bits 26-31: count (upgrade count)
-        -- 
+        --
         -- For each entry where count is 0, we could set it to 1 to indicate JP spent
         -- But this is complex bit manipulation. Instead, let's try the simpler approach
         -- of just ensuring each job has at least one entry with count > 0
-        
+
         local modified = 0;
         for i = 0, jobPointCount - 1 do
             local offset = 4 + (i * 4);
             -- Read last byte which contains count in bits 2-7
             local lastByte = ptr[offset + 3];
             local count = bit.rshift(lastByte, 2);
-            
+
             if count == 0 then
                 -- Set count to 1 (shift left by 2 to put in correct position)
                 ptr[offset + 3] = bit.bor(bit.band(lastByte, 0x03), bit.lshift(1, 2));
                 modified = modified + 1;
             end
         end
-        
+
         if modified > 0 then
             printMsg(string.format('Modified %d JP category entries: count 0 -> 1', modified));
         end
@@ -693,10 +703,14 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('  /ujp scan         - Scan for level check patterns');
         printMsg('  /ujp scanall      - Aggressive scan for ALL 99 comparisons');
         printMsg('  /ujp scanjobs     - Scan for per-job enable patterns');
-        printMsg('  /ujp dumpjobs     - Info about job points data structure');
+        printMsg('  /ujp dumpjobs     - Show player job levels from API');
+        printMsg('  /ujp setjobs99    - Search for job level memory and set to 99');
+        printMsg('  /ujp forcelvl99 <addr> - Force job levels to 99 at address');
+        printMsg('  /ujp scanjobmem   - Scan for job level arrays in memory');
         printMsg('  /ujp findjpdata   - Search for JP data references');
         printMsg('  /ujp watchmem <addr> <len> - Dump memory region');
         printMsg('  /ujp patch <hex>  - Manually patch address');
+        printMsg('  /ujp patchall     - Aggressively patch ALL 99 comparisons');
         printMsg('  /ujp restore      - Restore all patches');
         printMsg('  /ujp repatch      - Re-apply automatic patches');
         printMsg('  /ujp test <num>   - Toggle patch #num to identify its purpose');
@@ -723,6 +737,50 @@ ashita.events.register('command', 'command_cb', function(e)
         scanAll99();
     elseif cmd == 'scanjobs' then
         scanForJobPatterns();
+    elseif cmd == 'patchall' then
+        -- Aggressively patch ALL level 99 comparisons in FFXiMain.dll
+        printMsg('Aggressively patching ALL level 99 comparisons...');
+        
+        local patterns = {
+            { pattern = '3C63', offset = 1, name = 'cmp al,63h' },
+            { pattern = '80F963', offset = 2, name = 'cmp cl,63h' },
+            { pattern = '80FA63', offset = 2, name = 'cmp dl,63h' },
+            { pattern = '80FB63', offset = 2, name = 'cmp bl,63h' },
+            { pattern = '83F863', offset = 2, name = 'cmp eax,63h' },
+            { pattern = '83F963', offset = 2, name = 'cmp ecx,63h' },
+            { pattern = '83FA63', offset = 2, name = 'cmp edx,63h' },
+            { pattern = '83FB63', offset = 2, name = 'cmp ebx,63h' },
+            { pattern = '83FE63', offset = 2, name = 'cmp esi,63h' },
+            { pattern = '83FF63', offset = 2, name = 'cmp edi,63h' },
+        };
+        
+        local patched = {};
+        local totalCount = 0;
+        
+        for _, p in ipairs(patterns) do
+            local count = 0;
+            local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+            
+            while addr ~= 0 and count < 50 do
+                local patchAddr = addr + p.offset;
+                
+                if not patched[patchAddr] then
+                    local currentByte = ashita.memory.read_uint8(patchAddr);
+                    if currentByte == ORIGINAL_LEVEL then
+                        applyPatch(patchAddr, TARGET_LEVEL, p.name);
+                        patched[patchAddr] = true;
+                        totalCount = totalCount + 1;
+                        printMsg(string.format('  Patched 0x%08X (%s)', patchAddr, p.name));
+                    end
+                end
+                
+                count = count + 1;
+                addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
+            end
+        end
+        
+        printSuccess(string.format('Patched %d additional level 99 comparisons.', totalCount));
+        printMsg('Now try opening the Job Points menu.');
     elseif cmd == 'patch' then
         if #args < 3 then
             printError('Usage: /ujp patch <address>');
@@ -816,43 +874,150 @@ ashita.events.register('command', 'command_cb', function(e)
         -- Try to find and dump the job points data structure in memory
         -- The data is structured as: capacityPoints(u16), currentJp(u16), totalJpSpent(u16) per job
         -- Total: 6 bytes per job, 23 jobs (0-22)
-        printMsg('Searching for job points data structure in memory...');
-
-        -- Job names for display
-        local jobNames = {
-            [0] = 'NON',
-            [1] = 'WAR',
-            [2] = 'MNK',
-            [3] = 'WHM',
-            [4] = 'BLM',
-            [5] = 'RDM',
-            [6] = 'THF',
-            [7] = 'PLD',
-            [8] = 'DRK',
-            [9] = 'BST',
-            [10] = 'BRD',
-            [11] = 'RNG',
-            [12] = 'SAM',
-            [13] = 'NIN',
-            [14] = 'DRG',
-            [15] = 'SMN',
-            [16] = 'BLU',
-            [17] = 'COR',
-            [18] = 'PUP',
-            [19] = 'DNC',
-            [20] = 'SCH',
-            [21] = 'GEO',
-            [22] = 'RUN',
-        };
-
-        -- Try to find jobpoints data by searching for the pattern sent by server
-        -- Look for a pointer to the job points array
-        -- The data comes from packet 0x063 subtype JobPoints
-
-        -- Search for common patterns that might be near job point data
-        local searchPatterns = {
-            '00000000000000000000000000', -- Array of zeros (uninitialized jobs)
-        };
+        printMsg('Searching for player job levels in memory...');
+        
+        -- Try to get player data from Ashita memory manager
+        local player = AshitaCore:GetMemoryManager():GetPlayer();
+        if player then
+            printMsg('Player job levels from Ashita API:');
+            for jobId = 1, 22 do
+                local level = player:GetJobLevel(jobId);
+                local name = jobNames[jobId] or tostring(jobId);
+                if level > 0 then
+                    printMsg(string.format('  %s (job %d): Level %d', name, jobId, level));
+                end
+            end
+            
+            printMsg('');
+            printMsg('Main job: ' .. (jobNames[player:GetMainJob()] or '?') .. ' Lv.' .. player:GetMainJobLevel());
+            printMsg('Sub job: ' .. (jobNames[player:GetSubJob()] or '?') .. ' Lv.' .. player:GetSubJobLevel());
+        else
+            printError('Could not get player object');
+        end
+    elseif cmd == 'setjobs99' then
+        -- Try to set all job levels to 99 in client memory
+        -- This is a more direct approach than packet modification
+        printMsg('Attempting to set job levels to 99 in client memory...');
+        
+        -- The Ashita API is read-only, so we need to find the actual memory location
+        -- Look for the pattern of job levels based on what we see from the API
+        local player = AshitaCore:GetMemoryManager():GetPlayer();
+        if not player then
+            printError('Could not get player object');
+            return;
+        end
+        
+        -- Get current job levels to form a search pattern
+        local levels = {};
+        local patternStr = '';
+        for jobId = 1, 10 do
+            local level = player:GetJobLevel(jobId);
+            table.insert(levels, level);
+            patternStr = patternStr .. string.format('%02X', level);
+        end
+        
+        printMsg('Searching for job level pattern: ' .. patternStr);
+        
+        -- Search FFXiMain.dll data sections for this pattern
+        local addr = ashita.memory.find('FFXiMain.dll', 0, patternStr, 0, 0);
+        if addr ~= 0 then
+            printMsg(string.format('Found job levels at 0x%08X', addr));
+            
+            -- Read and display current values
+            printMsg('Current values:');
+            for i = 0, 22 do
+                local jobLevel = ashita.memory.read_uint8(addr + i);
+                local name = jobNames[i] or tostring(i);
+                if jobLevel > 0 then
+                    printMsg(string.format('  +%02X: %s = %d', i, name, jobLevel));
+                end
+            end
+            
+            printMsg('');
+            printMsg('To set all to 99, run: /ujp forcelvl99 ' .. string.format('%08X', addr));
+        else
+            printMsg('Could not find job level pattern in FFXiMain.dll');
+            printMsg('Try searching with /ujp scanjobmem');
+        end
+    elseif cmd == 'forcelvl99' then
+        -- Force all job levels to 99 at a specific memory address
+        if #args < 3 then
+            printError('Usage: /ujp forcelvl99 <address>');
+            printMsg('Use /ujp setjobs99 first to find the address');
+            return;
+        end
+        
+        local addr = tonumber(args[3], 16);
+        if not addr or addr == 0 then
+            printError('Invalid address: ' .. args[3]);
+            return;
+        end
+        
+        printMsg(string.format('Setting all job levels to 99 at 0x%08X...', addr));
+        
+        -- Save backups and write 99 to each job slot
+        for i = 0, 22 do
+            local backup = ashita.memory.read_uint8(addr + i);
+            if backup > 0 then
+                ashita.memory.write_uint8(addr + i, 99);
+                printMsg(string.format('  Job %d: %d -> 99', i, backup));
+            end
+        end
+        
+        printSuccess('Job levels set to 99. Check JP menu now!');
+        printMsg('Note: This change may be overwritten by incoming packets.');
+    elseif cmd == 'scanjobmem' then
+        -- Scan for where job levels might be stored
+        -- Look for patterns like: multiple consecutive bytes with values in range 1-99
+        printMsg('Scanning for potential job level arrays in FFXiMain.dll...');
+        
+        -- The player likely has SMN 75, so look for 0x4B at position 15
+        -- Combined with other known job levels
+        local player = AshitaCore:GetMemoryManager():GetPlayer();
+        if not player then
+            printError('Could not get player object');
+            return;
+        end
+        
+        -- Build pattern for jobs 12-16 (SAM, NIN, DRG, SMN, BLU)
+        -- These are close together in memory
+        local pattern = '';
+        local patternJobs = '';
+        for jobId = 12, 16 do
+            local level = player:GetJobLevel(jobId);
+            pattern = pattern .. string.format('%02X', level);
+            patternJobs = patternJobs .. string.format(' %d=%d', jobId, level);
+        end
+        
+        printMsg('Searching for pattern:' .. patternJobs);
+        printMsg('Pattern hex: ' .. pattern);
+        
+        local count = 0;
+        local addr = ashita.memory.find('FFXiMain.dll', 0, pattern, 0, count);
+        
+        while addr ~= 0 and count < 20 do
+            printMsg(string.format('Found at 0x%08X', addr));
+            
+            -- Calculate base address (subtract offset for job 12)
+            local baseAddr = addr - 12;
+            printMsg(string.format('  Potential base: 0x%08X', baseAddr));
+            
+            -- Read surrounding context
+            printMsg('  Context around match:');
+            for i = -4, 20 do
+                local byte = ashita.memory.read_uint8(addr + i);
+                local marker = '';
+                if i == 0 then marker = ' <-- match start'; end
+                printMsg(string.format('    +%02d: 0x%02X (%3d)%s', i, byte, byte, marker));
+            end
+            
+            count = count + 1;
+            addr = ashita.memory.find('FFXiMain.dll', 0, pattern, 0, count);
+        end
+        
+        if count == 0 then
+            printMsg('No matches found.');
+        end
 
         -- Alternative: Try to find the data structure by looking for specific patterns
         -- in the FFXiMain.dll data section
