@@ -184,28 +184,20 @@ end
 * The client checks if job_points_spent > 0 to enable each job in the menu.
 * We want to bypass this so all jobs are enabled once you have JOB_BREAKER.
 *
-* Strategy: Find "cmp word ptr [reg+4], 0" followed by JBE and search using full pattern
+* Strategy: Find "cmp word ptr [reg+4], 0" then check if followed by conditional jump
 --]]
 local function patchPerJobCheck()
     local patchCount = 0;
 
-    -- Search for the full pattern including the conditional jump
-    -- Pattern: 66 83 7? 04 00 76 XX (cmp word [reg+4], 0; jbe XX)
-    -- We NOP the JBE instruction (2 bytes at offset 5-6)
-
+    -- Search for the cmp instruction only (5 bytes)
+    -- Pattern: 66 83 7? 04 00 (cmp word [reg+4], 0)
+    -- Then check if byte at offset 5 is a conditional jump (74/75/76/77)
     local patterns = {
-        -- 66 83 78 04 00 76 = cmp word ptr [eax+4], 0; jbe
-        { pattern = '668378040076', jumpOffset = 5, name = 'cmp word [eax+4],0; jbe' },
-        -- 66 83 7E 04 00 76 = cmp word ptr [esi+4], 0; jbe
-        { pattern = '66837E040076', jumpOffset = 5, name = 'cmp word [esi+4],0; jbe' },
-        -- 66 83 79 04 00 76 = cmp word ptr [ecx+4], 0; jbe
-        { pattern = '668379040076', jumpOffset = 5, name = 'cmp word [ecx+4],0; jbe' },
-        -- 66 83 7F 04 00 76 = cmp word ptr [edi+4], 0; jbe
-        { pattern = '66837F040076', jumpOffset = 5, name = 'cmp word [edi+4],0; jbe' },
-        -- Also check JE (74) variants
-        { pattern = '668378040074', jumpOffset = 5, name = 'cmp word [eax+4],0; je' },
-        { pattern = '66837E040074', jumpOffset = 5, name = 'cmp word [esi+4],0; je' },
-        { pattern = '668379040074', jumpOffset = 5, name = 'cmp word [ecx+4],0; je' },
+        { pattern = '6683780400', name = 'cmp word [eax+4],0' },
+        { pattern = '66837E0400', name = 'cmp word [esi+4],0' },
+        { pattern = '6683790400', name = 'cmp word [ecx+4],0' },
+        { pattern = '66837F0400', name = 'cmp word [edi+4],0' },
+        { pattern = '66837B0400', name = 'cmp word [ebx+4],0' },
     };
 
     local patched = {};
@@ -215,24 +207,29 @@ local function patchPerJobCheck()
         local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
 
         while addr ~= 0 and count < 50 do
-            local patchAddr = addr + p.jumpOffset;
+            -- The conditional jump (if present) is at offset 5
+            local patchAddr = addr + 5;
+            local jumpByte = ashita.memory.read_uint8(patchAddr);
 
-            if not patched[patchAddr] then
-                local byte1 = ashita.memory.read_uint8(patchAddr);
+            -- Check if this is followed by a conditional jump
+            -- 74 = JE, 75 = JNE, 76 = JBE, 77 = JA
+            local isConditionalJump = (jumpByte == 0x74 or jumpByte == 0x75 or jumpByte == 0x76 or jumpByte == 0x77);
+
+            if not patched[patchAddr] and isConditionalJump then
                 local byte2 = ashita.memory.read_uint8(patchAddr + 1);
 
                 -- Store for restore
                 table.insert(state.patches, {
                     address = patchAddr,
-                    original = byte1,
+                    original = jumpByte,
                     patched = 0x90,
-                    description = p.name .. ' byte 1'
+                    description = p.name .. ' jump byte 1'
                 });
                 table.insert(state.patches, {
                     address = patchAddr + 1,
                     original = byte2,
                     patched = 0x90,
-                    description = p.name .. ' byte 2'
+                    description = p.name .. ' jump byte 2'
                 });
 
                 -- NOP the conditional jump
@@ -242,7 +239,7 @@ local function patchPerJobCheck()
                 patched[patchAddr] = true;
                 patchCount = patchCount + 1;
                 printMsg(string.format('Per-job patch at 0x%08X: NOP (was %02X %02X) - %s',
-                    patchAddr, byte1, byte2, p.name));
+                    patchAddr, jumpByte, byte2, p.name));
             end
 
             count = count + 1;
