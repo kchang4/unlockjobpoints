@@ -211,11 +211,15 @@ local function patchPerJobCheck()
             local patchAddr = addr + 5;
             local jumpByte = ashita.memory.read_uint8(patchAddr);
 
-            -- Check if this is followed by a conditional jump
-            -- 74 = JE, 75 = JNE, 76 = JBE, 77 = JA
-            local isConditionalJump = (jumpByte == 0x74 or jumpByte == 0x75 or jumpByte == 0x76 or jumpByte == 0x77);
+            -- Only patch jumps that SKIP when points_spent is 0/low:
+            -- 74 = JE (jump if equal to 0) - skip enable when 0
+            -- 76 = JBE (jump if below or equal) - skip enable when <= 0
+            -- Do NOT patch:
+            -- 75 = JNE (jump if NOT equal) - this is the ENABLE path!
+            -- 77 = JA (jump if above) - this is the ENABLE path!
+            local shouldPatch = (jumpByte == 0x74 or jumpByte == 0x76);
 
-            if not patched[patchAddr] and isConditionalJump then
+            if not patched[patchAddr] and shouldPatch then
                 local byte2 = ashita.memory.read_uint8(patchAddr + 1);
 
                 -- Store for restore
