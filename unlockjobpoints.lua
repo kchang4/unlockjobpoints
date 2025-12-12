@@ -105,7 +105,7 @@ local function restorePatches()
         -- Handle both naming conventions (ptr/backup from applyPatch, address/original from per-job)
         local addr = patch.ptr or patch.address;
         local originalByte = patch.backup or patch.original;
-        
+
         if addr and originalByte then
             ashita.memory.write_uint8(addr, originalByte);
             debugPrint(string.format('Restored 0x%08X: 0x%02X', addr, originalByte));
@@ -184,59 +184,69 @@ end
 * The client checks if job_points_spent > 0 to enable each job in the menu.
 * We want to bypass this so all jobs are enabled once you have JOB_BREAKER.
 *
-* Based on scanjobs output, we patch the JBE instructions that follow 
-* "cmp word ptr [reg+4], 0" - these check points_spent field.
+* Strategy: Find "cmp word ptr [reg+4], 0" followed by JBE and search using full pattern
 --]]
 local function patchPerJobCheck()
     local patchCount = 0;
+
+    -- Search for the full pattern including the conditional jump
+    -- Pattern: 66 83 7? 04 00 76 XX (cmp word [reg+4], 0; jbe XX)
+    -- We NOP the JBE instruction (2 bytes at offset 5-6)
     
-    -- Direct addresses from scanjobs scan output
-    -- Format: { address of JBE opcode, expected bytes (JBE + offset) }
-    -- We NOP both bytes of the conditional jump
-    local directPatches = {
-        -- From: 0x04474026: 74 0E 66 83 78 04 00 76 07
-        -- The 76 07 (JBE +7) is at 0x04474026 + 7 = 0x0447402D
-        { addr = 0x0447402D, expectedJump = 0x76, name = 'Job menu check 1 (eax+4)' },
-        
-        -- From: 0x04474108: 01 00 66 83 7E 04 00 76 08  
-        -- The 76 08 (JBE +8) is at 0x04474108 + 7 = 0x0447410F
-        { addr = 0x0447410F, expectedJump = 0x76, name = 'Job menu check 2 (esi+4)' },
-        
-        -- From: 0x044C18E0: 90 90 66 83 79 04 00 76 0B
-        -- The 76 0B (JBE +11) is at 0x044C18E0 + 7 = 0x044C18E7
-        { addr = 0x044C18E7, expectedJump = 0x76, name = 'Job menu check 3 (ecx+4)' },
+    local patterns = {
+        -- 66 83 78 04 00 76 = cmp word ptr [eax+4], 0; jbe
+        { pattern = '668378040076', jumpOffset = 5, name = 'cmp word [eax+4],0; jbe' },
+        -- 66 83 7E 04 00 76 = cmp word ptr [esi+4], 0; jbe
+        { pattern = '66837E040076', jumpOffset = 5, name = 'cmp word [esi+4],0; jbe' },
+        -- 66 83 79 04 00 76 = cmp word ptr [ecx+4], 0; jbe
+        { pattern = '668379040076', jumpOffset = 5, name = 'cmp word [ecx+4],0; jbe' },
+        -- 66 83 7F 04 00 76 = cmp word ptr [edi+4], 0; jbe
+        { pattern = '66837F040076', jumpOffset = 5, name = 'cmp word [edi+4],0; jbe' },
+        -- Also check JE (74) variants
+        { pattern = '668378040074', jumpOffset = 5, name = 'cmp word [eax+4],0; je' },
+        { pattern = '66837E040074', jumpOffset = 5, name = 'cmp word [esi+4],0; je' },
+        { pattern = '668379040074', jumpOffset = 5, name = 'cmp word [ecx+4],0; je' },
     };
     
-    for _, p in ipairs(directPatches) do
-        local currentByte = ashita.memory.read_uint8(p.addr);
-        local nextByte = ashita.memory.read_uint8(p.addr + 1);
+    local patched = {};
+    
+    for _, p in ipairs(patterns) do
+        local count = 0;
+        local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
         
-        -- Verify this is a conditional jump before patching
-        if currentByte == p.expectedJump or currentByte == 0x74 or currentByte == 0x75 or currentByte == 0x77 then
-            -- Store for restore
-            table.insert(state.patches, {
-                address = p.addr,
-                original = currentByte,
-                patched = 0x90,
-                description = p.name .. ' byte 1'
-            });
-            table.insert(state.patches, {
-                address = p.addr + 1,
-                original = nextByte,
-                patched = 0x90,
-                description = p.name .. ' byte 2'
-            });
+        while addr ~= 0 and count < 50 do
+            local patchAddr = addr + p.jumpOffset;
             
-            -- NOP out the jump
-            ashita.memory.write_uint8(p.addr, 0x90);
-            ashita.memory.write_uint8(p.addr + 1, 0x90);
+            if not patched[patchAddr] then
+                local byte1 = ashita.memory.read_uint8(patchAddr);
+                local byte2 = ashita.memory.read_uint8(patchAddr + 1);
+                
+                -- Store for restore
+                table.insert(state.patches, {
+                    address = patchAddr,
+                    original = byte1,
+                    patched = 0x90,
+                    description = p.name .. ' byte 1'
+                });
+                table.insert(state.patches, {
+                    address = patchAddr + 1,
+                    original = byte2,
+                    patched = 0x90,
+                    description = p.name .. ' byte 2'
+                });
+                
+                -- NOP the conditional jump
+                ashita.memory.write_uint8(patchAddr, 0x90);
+                ashita.memory.write_uint8(patchAddr + 1, 0x90);
+                
+                patched[patchAddr] = true;
+                patchCount = patchCount + 1;
+                printMsg(string.format('Per-job patch at 0x%08X: NOP (was %02X %02X) - %s', 
+                    patchAddr, byte1, byte2, p.name));
+            end
             
-            patchCount = patchCount + 1;
-            printMsg(string.format('Per-job patch: NOP at 0x%08X (was %02X %02X) - %s', 
-                p.addr, currentByte, nextByte, p.name));
-        else
-            printMsg(string.format('Skipped 0x%08X - byte is %02X, expected %02X - %s', 
-                p.addr, currentByte, p.expectedJump, p.name));
+            count = count + 1;
+            addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
         end
     end
 
