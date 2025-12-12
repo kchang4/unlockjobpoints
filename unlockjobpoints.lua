@@ -524,9 +524,9 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
     -- We need to set all job levels to 99 for the JP menu per-job checks
     if e.id == 0x0061 then
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
-        
+
         printMsg(string.format('*** Intercepted Char Stats packet (0x061) size=%d ***', e.size));
-        
+
         -- Dump first 64 bytes to see structure
         if state.debug then
             local hexDump = '';
@@ -538,25 +538,25 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
                 end
             end
         end
-        
+
         -- Try multiple possible offsets for job levels array
         -- Different sources report different offsets
         local possibleOffsets = {
-            0x14,  -- Some sources say here
-            0x44,  -- Other sources say here  
-            0x60,  -- Also possible
+            0x14, -- Some sources say here
+            0x44, -- Other sources say here
+            0x60, -- Also possible
         };
-        
+
         -- Main job level is at 0x0D, let's verify that first
         local mainJobLevel = ptr[0x0D];
         printMsg(string.format('  Main job level at 0x0D: %d', mainJobLevel));
-        
+
         -- Force set main job level to 99
         if mainJobLevel > 0 and mainJobLevel < 99 then
             ptr[0x0D] = 99;
             printMsg('  -> Set main job level to 99');
         end
-        
+
         -- Sub job level is at 0x0F
         local subJobLevel = ptr[0x0F];
         if subJobLevel > 0 and subJobLevel < 99 then
@@ -631,18 +631,46 @@ ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
 
     -- Packet 0x08D = Job Points Categories
     if e.id == 0x008D then
-        printMsg('*** Received Job Points CATEGORIES packet (0x08D) ***');
-
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
         local jobPointCount = (e.size / 4) - 1;
 
-        debugPrint(string.format('  Job Point entries: %d', jobPointCount));
-
-        -- From tCrossBar:
-        -- local index = ashita.bits.unpack_be(e.data_raw, offset, 0, 5);
-        -- local job = ashita.bits.unpack_be(e.data_raw, offset, 5, 11);
-        -- local count = ashita.bits.unpack_be(e.data_raw, offset + 3, 2, 6);
-        -- This packet contains the individual category upgrade counts
+        debugPrint(string.format('*** Received Job Points CATEGORIES packet (0x08D), entries: %d ***', jobPointCount));
+        
+        -- Dump first few entries to understand structure
+        if state.debug then
+            for i = 0, math.min(7, jobPointCount - 1) do
+                local offset = 4 + (i * 4);
+                local b0, b1, b2, b3 = ptr[offset], ptr[offset+1], ptr[offset+2], ptr[offset+3];
+                debugPrint(string.format('  Entry %d: %02X %02X %02X %02X', i, b0, b1, b2, b3));
+            end
+        end
+        
+        -- The structure per tCrossBar (big-endian bit unpacking):
+        -- bits 0-4: index (category index within job, 0-31)
+        -- bits 5-15: job (job ID)
+        -- bits 26-31: count (upgrade count)
+        -- 
+        -- For each entry where count is 0, we could set it to 1 to indicate JP spent
+        -- But this is complex bit manipulation. Instead, let's try the simpler approach
+        -- of just ensuring each job has at least one entry with count > 0
+        
+        local modified = 0;
+        for i = 0, jobPointCount - 1 do
+            local offset = 4 + (i * 4);
+            -- Read last byte which contains count in bits 2-7
+            local lastByte = ptr[offset + 3];
+            local count = bit.rshift(lastByte, 2);
+            
+            if count == 0 then
+                -- Set count to 1 (shift left by 2 to put in correct position)
+                ptr[offset + 3] = bit.bor(bit.band(lastByte, 0x03), bit.lshift(1, 2));
+                modified = modified + 1;
+            end
+        end
+        
+        if modified > 0 then
+            printMsg(string.format('Modified %d JP category entries: count 0 -> 1', modified));
+        end
     end
 end);
 
