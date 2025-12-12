@@ -184,29 +184,41 @@ end
 * The client checks if job_points_spent > 0 to enable each job in the menu.
 * We want to bypass this so all jobs are enabled once you have JOB_BREAKER.
 *
-* Strategy: Find "cmp word ptr [reg+4], 0" then check if followed by conditional jump
+* Strategy: Find "cmp word ptr [reg+X], 0" then check if followed by conditional jump
 --]]
 local function patchPerJobCheck()
     local patchCount = 0;
 
     -- Search for the cmp instruction only (5 bytes)
-    -- Pattern: 66 83 7? 04 00 (cmp word [reg+4], 0)
-    -- Then check if byte at offset 5 is a conditional jump (74/75/76/77)
+    -- Pattern: 66 83 7? XX 00 (cmp word [reg+XX], 0)
+    -- Check offset +4 (points) and +6 (points_spent in struct)
+    -- Then check if byte at offset 5 is a conditional jump (74/76)
     local patterns = {
+        -- Offset +4 patterns
         { pattern = '6683780400', name = 'cmp word [eax+4],0' },
         { pattern = '66837E0400', name = 'cmp word [esi+4],0' },
         { pattern = '6683790400', name = 'cmp word [ecx+4],0' },
         { pattern = '66837F0400', name = 'cmp word [edi+4],0' },
         { pattern = '66837B0400', name = 'cmp word [ebx+4],0' },
+        { pattern = '66837A0400', name = 'cmp word [edx+4],0' },
+        -- Offset +6 patterns (points_spent may be here too)
+        { pattern = '6683780600', name = 'cmp word [eax+6],0' },
+        { pattern = '66837E0600', name = 'cmp word [esi+6],0' },
+        { pattern = '6683790600', name = 'cmp word [ecx+6],0' },
+        { pattern = '66837F0600', name = 'cmp word [edi+6],0' },
+        { pattern = '66837D0600', name = 'cmp word [ebp+6],0' },
+        { pattern = '66837A0600', name = 'cmp word [edx+6],0' },
     };
 
     local patched = {};
+    local foundAny = false;
 
     for _, p in ipairs(patterns) do
         local count = 0;
         local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
 
         while addr ~= 0 and count < 50 do
+            foundAny = true;
             -- The conditional jump (if present) is at offset 5
             local patchAddr = addr + 5;
             local jumpByte = ashita.memory.read_uint8(patchAddr);
@@ -244,11 +256,19 @@ local function patchPerJobCheck()
                 patchCount = patchCount + 1;
                 printMsg(string.format('Per-job patch at 0x%08X: NOP (was %02X %02X) - %s',
                     patchAddr, jumpByte, byte2, p.name));
+            else
+                -- Debug: show what we found but didn't patch
+                debugPrint(string.format('Found %s at 0x%08X, next byte is %02X (not patching)',
+                    p.name, addr, jumpByte));
             end
 
             count = count + 1;
             addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
         end
+    end
+
+    if not foundAny then
+        debugPrint('No cmp word patterns found at all - pattern search may be failing');
     end
 
     return patchCount;
