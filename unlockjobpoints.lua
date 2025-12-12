@@ -197,15 +197,21 @@ local function patchPerJobCheck()
     --   66 39 ?? 04 74 XX     = cmp [reg+4], reg; je short (comparing to zero via register)
     
     local patterns = {
-        -- cmp word ptr [reg+4], 0; je short (patch je to jmp or nop the comparison)
-        -- 66 83 7E 04 00 74 = cmp word ptr [esi+4], 0; je
-        { pattern = '6683??040074', offset = 5, patchByte = 0xEB, name = 'cmp word [reg+4],0; je -> jmp' },
-        { pattern = '6683??040075', offset = 5, patchByte = 0xEB, name = 'cmp word [reg+4],0; jne -> jmp' },
-        -- 66 83 7E 04 00 0F 84 = cmp word ptr [esi+4], 0; je near
-        { pattern = '66837E0400', offset = 4, patchByte = 0x01, name = 'cmp word [esi+4],0 -> 1 (always true)' },
-        { pattern = '66837F0400', offset = 4, patchByte = 0x01, name = 'cmp word [edi+4],0 -> 1 (always true)' },
-        -- test word ptr patterns
-        { pattern = '6685??040074', offset = 5, patchByte = 0xEB, name = 'test word [reg+4]; je -> jmp' },
+        -- From scanjobs output - these are the patterns that check points_spent (offset +4)
+        -- The pattern is: cmp word ptr [reg+4], 0 (66 83 7X 04 00) followed by jbe (76)
+        -- JBE means "if points_spent <= 0, skip" - we NOP it to always fall through (enable)
+        
+        -- Pattern: 66 83 78 04 00 76 = cmp word ptr [eax+4], 0; jbe
+        -- Found at 0x04474026 - likely Job Points menu item enable check
+        { pattern = '6683780400', offset = 5, patchLen = 2, name = 'cmp word [eax+4],0 - NOP jbe' },
+        
+        -- Pattern: 66 83 7E 04 00 76 = cmp word ptr [esi+4], 0; jbe  
+        -- Found at 0x04474108 - another Job Points menu check
+        { pattern = '66837E0400', offset = 5, patchLen = 2, name = 'cmp word [esi+4],0 - NOP jbe' },
+        
+        -- Pattern: 66 83 79 04 00 76 = cmp word ptr [ecx+4], 0; jbe
+        -- Found at 0x044C18E0
+        { pattern = '6683790400', offset = 5, patchLen = 2, name = 'cmp word [ecx+4],0 - NOP jbe' },
     };
     
     local patched = {};
@@ -217,11 +223,39 @@ local function patchPerJobCheck()
         while addr ~= 0 and count < 30 do
             local patchAddr = addr + p.offset;
             
-            if not patched[patchAddr] then
-                applyPatch(patchAddr, p.patchByte, p.name);
+            -- Check if this is followed by a conditional jump (76=JBE, 74=JE, 77=JA)
+            local jumpByte = ashita.memory.read_uint8(patchAddr);
+            local isConditionalJump = (jumpByte == 0x76 or jumpByte == 0x74 or jumpByte == 0x77 or jumpByte == 0x75);
+            
+            if not patched[patchAddr] and isConditionalJump then
+                -- NOP out the 2-byte conditional jump
+                local original1 = ashita.memory.read_uint8(patchAddr);
+                local original2 = ashita.memory.read_uint8(patchAddr + 1);
+                
+                -- Store original bytes for restore
+                table.insert(patchedLocations, {
+                    address = patchAddr,
+                    original = original1,
+                    patched = 0x90,
+                    description = p.name .. ' byte 1'
+                });
+                table.insert(patchedLocations, {
+                    address = patchAddr + 1,
+                    original = original2,
+                    patched = 0x90,
+                    description = p.name .. ' byte 2'
+                });
+                
+                -- Apply NOP patches
+                ashita.memory.write_uint8(patchAddr, 0x90);
+                ashita.memory.write_uint8(patchAddr + 1, 0x90);
+                
                 patched[patchAddr] = true;
                 patchCount = patchCount + 1;
-                debugPrint(string.format('Per-job patch at 0x%08X (%s)', patchAddr, p.name));
+                printMsg(string.format('Per-job patch: NOP at 0x%08X (was %02X %02X) - %s', 
+                    patchAddr, original1, original2, p.name));
+            elseif not patched[patchAddr] then
+                debugPrint(string.format('Skipped 0x%08X - not a conditional jump (byte=%02X)', patchAddr, jumpByte));
             end
             
             count = count + 1;
