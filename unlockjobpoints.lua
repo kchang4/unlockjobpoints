@@ -102,8 +102,14 @@ end
 --]]
 local function restorePatches()
     for _, patch in ipairs(state.patches) do
-        ashita.memory.write_uint8(patch.ptr, patch.backup);
-        debugPrint(string.format('Restored 0x%08X: 0x%02X', patch.ptr, patch.backup));
+        -- Handle both naming conventions (ptr/backup from applyPatch, address/original from per-job)
+        local addr = patch.ptr or patch.address;
+        local originalByte = patch.backup or patch.original;
+        
+        if addr and originalByte then
+            ashita.memory.write_uint8(addr, originalByte);
+            debugPrint(string.format('Restored 0x%08X: 0x%02X', addr, originalByte));
+        end
     end
     state.patches = {};
 end
