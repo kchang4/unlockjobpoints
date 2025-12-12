@@ -72,10 +72,13 @@ local state = {
 -- Known working addresses for specific client versions
 -- Format: { [address] = 'purpose' }
 local knownAddresses = {
-    -- Identified patches:
-    [0x045184F7] = 'Job Points Menu',
-    [0x0459A605] = 'Unknown (level check)',
-    [0x047338F9] = 'Unknown (level check)',
+    -- Identified patches (addresses may vary by client version):
+    [0x045184F7] = 'Job Points Menu Main Check',
+    [0x046D84F7] = 'Job Points Menu Main Check (alt)',  -- Same offset, different base
+    [0x0459A605] = 'Level Check',
+    [0x0475A605] = 'Level Check (alt)',  -- Same offset, different base
+    [0x047338F9] = 'Level Check',
+    [0x046D9BA6] = 'Per-Job Level Check',  -- THE KEY ONE for enabling individual jobs!
 };
 
 --[[
@@ -217,6 +220,35 @@ end
 --]]
 local function searchAndPatch()
     local patchCount = 0;
+    local patched = {}; -- Track addresses we've already patched
+
+    -- First, try to patch known critical addresses directly
+    -- These are addresses we've identified through testing
+    local criticalAddresses = {
+        -- Per-job level check - THE KEY ONE for enabling individual jobs
+        -- Pattern is "3C 63" (cmp al, 63h) - we patch the 0x63 byte
+        { search = '3C63', name = 'Per-Job Level Check', expectedContext = 'cmp al,63h' },
+    };
+    
+    -- Search for the per-job check pattern and patch all occurrences
+    for _, critical in ipairs(criticalAddresses) do
+        local count = 0;
+        local addr = ashita.memory.find('FFXiMain.dll', 0, critical.search, 0, count);
+        
+        while addr ~= 0 and count < 100 do
+            local patchAddr = addr + 1;  -- The 0x63 is at offset 1 in "3C 63"
+            local currentByte = ashita.memory.read_uint8(patchAddr);
+            
+            if currentByte == ORIGINAL_LEVEL and not patched[patchAddr] then
+                applyPatch(patchAddr, TARGET_LEVEL, critical.name);
+                patched[patchAddr] = true;
+                patchCount = patchCount + 1;
+            end
+            
+            count = count + 1;
+            addr = ashita.memory.find('FFXiMain.dll', 0, critical.search, 0, count);
+        end
+    end
 
     -- Known patterns for level 99 comparisons
     -- These patterns include the conditional jump after the comparison for accuracy
@@ -284,8 +316,7 @@ local function searchAndPatch()
         { pattern = '3C637F',           offset = 1, name = 'cmp al,63h; jg' },
     };
 
-    local patched = {}; -- Track addresses we've already patched
-
+    -- Continue with pattern-based patching (patched table already exists from above)
     for _, p in ipairs(patterns) do
         -- Search for all occurrences of this pattern
         local count = 0;
