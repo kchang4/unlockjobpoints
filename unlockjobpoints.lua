@@ -40,13 +40,13 @@ local state = {
     debug = false,
 };
 
--- Known working addresses for specific client versions (add yours here after testing)
--- Format: { address = purpose }
+-- Known working addresses for specific client versions
+-- Format: { [address] = 'purpose' }
 local knownAddresses = {
-    -- Your client version (add after identifying which patch does what):
-    -- [0x0459A605] = 'Job Points Menu',
-    -- [0x047338F9] = 'Unknown (Master Levels?)',
-    -- [0x045184F7] = 'Unknown (CP Display?)',
+    -- Identified patches:
+    [0x045184F7] = 'Job Points Menu',
+    [0x0459A605] = 'Unknown (level check)',
+    [0x047338F9] = 'Unknown (level check)',
 };
 
 --[[
