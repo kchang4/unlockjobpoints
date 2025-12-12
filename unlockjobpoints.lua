@@ -19,13 +19,16 @@
 * along with Ashita.  If not, see <https://www.gnu.org/licenses/>.
 --]]
 
-addon.name      = 'jobpointsunlock';
+addon.name      = 'unlockjobpoints';
 addon.author    = 'FFXI-Ashita';
-addon.version   = '1.0.0';
+addon.version   = '1.1.0';
 addon.desc      = 'Unlocks the Job Points menu at any level (for 75-era servers)';
-addon.link      = '';
+addon.link      = 'https://github.com/kchang4/unlockjobpoints';
 
-require('common');
+-- Enable FFI for direct memory access
+local ffi = require('ffi');
+local jit = require('jit');
+jit.on();
 
 --[[
 * event: packet_in
@@ -33,23 +36,22 @@ require('common');
 --]]
 ashita.events.register('packet_in', 'packet_in_cb', function (e)
     -- Check for packet 0x63 (Miscdata)
-    if e.id == 0x0063 then
-        -- Get the packet type (offset 0x04, uint16)
-        local packetType = struct.unpack('H', e.data, 0x04 + 1)
+    if (e.id == 0x0063) then
+        local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
+        
+        -- Get the packet type at offset 0x04 (uint16)
+        local packetType = ptr[0x04];
         
         -- Type 0x05 = Job Points
-        if packetType == 0x05 then
+        if (packetType == 0x05) then
             -- The access/flags byte is at offset 0x08
             -- We need to set bit 0 to 1 to enable the menu
-            local currentFlags = struct.unpack('B', e.data, 0x08 + 1)
+            local currentFlags = ptr[0x08];
             
-            if bit.band(currentFlags, 1) == 0 then
+            if (bit.band(currentFlags, 1) == 0) then
                 -- Force the access flag to 1
-                local newData = e.data:sub(1, 0x08) .. string.char(bit.bor(currentFlags, 1)) .. e.data:sub(0x0A)
-                e.data = newData
-                e.data_modified = true
-                
-                print('[JobPointsUnlock] Enabled job points menu access')
+                ptr[0x08] = bit.bor(currentFlags, 1);
+                print('[UnlockJobPoints] Enabled job points menu access');
             end
         end
     end
@@ -60,7 +62,8 @@ end);
 * desc : Event called when the addon is being loaded.
 --]]
 ashita.events.register('load', 'load_cb', function ()
-    print('[JobPointsUnlock] Addon loaded - Job Points menu will be unlocked regardless of level');
+    print('[UnlockJobPoints] Addon loaded - Job Points menu will be unlocked regardless of level');
+    print('[UnlockJobPoints] Zone or relog to apply changes');
 end);
 
 --[[
@@ -68,5 +71,5 @@ end);
 * desc : Event called when the addon is being unloaded.
 --]]
 ashita.events.register('unload', 'unload_cb', function ()
-    print('[JobPointsUnlock] Addon unloaded');
+    print('[UnlockJobPoints] Addon unloaded');
 end);
