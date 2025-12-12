@@ -391,53 +391,104 @@ end);
 * desc : Intercept incoming packets to modify job points data
 *
 * Packet 0x063 is "miscdata" with various subtypes.
-* Subtype 0x05 is JobPoints data containing:
-*   - offset 0x08: access flag (1 byte)
-*   - offset 0x0A onwards: job data (6 bytes per job: capacityPoints, currentJp, totalJpSpent)
+* Subtype 0x05 is JobPoints Totals data containing:
+*   - offset 0x04: subtype (1 byte = 0x05)
+*   - offset 0x0C onwards: job data (6 bytes per job: capacityPoints u16, currentJp u16, totalJpSpent u16)
+*   - Based on tCrossBar: playerData.JobPoints[i].Total = struct.unpack('H', e.data, 0x0C + 0x04 + (6 * i) + 1);
+*     Which is offset 0x10 + (6*i) for totalJpSpent (the +4 is to get to the Total field within entry)
+*
+* Packet 0x08D is JobPoints Categories (individual upgrade counts per job)
+*   - Contains specific upgrade counts that may affect menu availability
 *
 * We modify totalJpSpent to 1 for any job with 0 spent to enable it in the menu.
 --]]
 ashita.events.register('packet_in', 'ujp_packet_in_cb', function(e)
+    -- Log ALL packets we receive if debug is on (to see what we're getting)
+    if state.debug and (e.id == 0x0063 or e.id == 0x008D) then
+        local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
+        local hexDump = '';
+        for i = 0, math.min(31, e.size - 1) do
+            hexDump = hexDump .. string.format('%02X ', ptr[i]);
+        end
+        printMsg(string.format('Packet 0x%04X (size=%d): %s', e.id, e.size, hexDump));
+    end
+
     -- Packet 0x063 = miscdata
     if e.id == 0x0063 then
         local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
         local subtype = ptr[0x04];
         
-        -- Subtype 0x05 = Job Points data
+        debugPrint(string.format('Packet 0x063 subtype=%d (0x%02X)', subtype, subtype));
+
+        -- Subtype 0x05 = Job Points Totals data
         if subtype == 0x05 then
-            debugPrint(string.format('Intercepted Job Points packet (0x063 subtype 0x05)'));
+            printMsg('*** Intercepted Job Points TOTALS packet (0x063 subtype 0x05) ***');
             
-            -- Job data starts at offset 0x0A (after header)
-            -- Each job: 6 bytes (capacityPoints u16, currentJp u16, totalJpSpent u16)
-            -- Jobs 1-22 (WAR to RUN), index 0 is unused
+            -- Based on tCrossBar analysis:
+            -- playerData.JobPoints[i].Total = struct.unpack('H', e.data, 0x0C + 0x04 + (6 * i) + 1);
+            -- In 0-based terms: offset = 0x0C + 0x04 + (6 * i) = 0x10 + (6 * i) for totalJpSpent
+            -- But wait - they're reading the TOTAL which is at +4 within the 6-byte entry
+            -- Entry layout: capacityPoints(2), currentJp(2), totalJpSpent(2)
+            -- So Total is at offset 4 within entry (totalJpSpent)
+            -- Base offset for job data is 0x0C (after 4-byte header + 8 bytes misc = 0x0C)
             
-            local jobDataOffset = 0x0A;
-            local jobEntrySize = 6;
-            local totalJpSpentOffset = 4; -- offset within job entry
+            local jobDataOffset = 0x0C;  -- Start of job array
+            local jobEntrySize = 6;       -- Each entry is 6 bytes
+            local totalJpSpentOffset = 4; -- totalJpSpent is at offset 4 within entry
             
             local modified = 0;
             for jobId = 1, 22 do
                 local entryOffset = jobDataOffset + (jobId * jobEntrySize);
                 local spentOffset = entryOffset + totalJpSpentOffset;
                 
-                -- Read current totalJpSpent (u16, little-endian)
+                -- Read current values for debugging
+                local cpLow = ptr[entryOffset];
+                local cpHigh = ptr[entryOffset + 1];
+                local capacityPoints = cpLow + (cpHigh * 256);
+                
+                local jpLow = ptr[entryOffset + 2];
+                local jpHigh = ptr[entryOffset + 3];
+                local currentJp = jpLow + (jpHigh * 256);
+                
                 local spentLow = ptr[spentOffset];
                 local spentHigh = ptr[spentOffset + 1];
                 local totalSpent = spentLow + (spentHigh * 256);
+                
+                if state.debug and jobId <= 5 then
+                    debugPrint(string.format('  Job %d @ 0x%02X: CP=%d, JP=%d, Spent=%d', 
+                        jobId, entryOffset, capacityPoints, currentJp, totalSpent));
+                end
                 
                 if totalSpent == 0 then
                     -- Set to 1 to enable the job in the menu
                     ptr[spentOffset] = 1;
                     ptr[spentOffset + 1] = 0;
                     modified = modified + 1;
-                    debugPrint(string.format('  Job %d: totalJpSpent 0 -> 1', jobId));
                 end
             end
             
             if modified > 0 then
-                debugPrint(string.format('Modified %d jobs in packet', modified));
+                printMsg(string.format('Modified %d jobs: totalJpSpent 0 -> 1', modified));
+            else
+                printMsg('No jobs needed modification (all have spent > 0)');
             end
         end
+    end
+    
+    -- Packet 0x08D = Job Points Categories
+    if e.id == 0x008D then
+        printMsg('*** Received Job Points CATEGORIES packet (0x08D) ***');
+        
+        local ptr = ffi.cast('uint8_t*', e.data_modified_raw);
+        local jobPointCount = (e.size / 4) - 1;
+        
+        debugPrint(string.format('  Job Point entries: %d', jobPointCount));
+        
+        -- From tCrossBar:
+        -- local index = ashita.bits.unpack_be(e.data_raw, offset, 0, 5);
+        -- local job = ashita.bits.unpack_be(e.data_raw, offset, 5, 11);
+        -- local count = ashita.bits.unpack_be(e.data_raw, offset + 3, 2, 6);
+        -- This packet contains the individual category upgrade counts
     end
 end);
 
@@ -468,6 +519,7 @@ ashita.events.register('command', 'command_cb', function(e)
         printMsg('  /ujp test <num>   - Toggle patch #num to identify its purpose');
         printMsg('  /ujp read <hex>   - Read byte at address');
         printMsg('  /ujp debug        - Toggle debug mode');
+        printMsg('  /ujp request      - Request JP data from server (triggers packet)');
         return;
     end
 
@@ -557,54 +609,90 @@ ashita.events.register('command', 'command_cb', function(e)
     elseif cmd == 'debug' then
         state.debug = not state.debug;
         printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
+    elseif cmd == 'request' then
+        -- Send packets to request job points data from server
+        -- Based on tCrossBar's player.lua:
+        -- Packet 0x61 requests main menu data (triggers job point totals via 0x063 subtype 5)
+        -- Packet 0xC0 requests job point menu data (triggers categories via 0x08D)
+        printMsg('Requesting job points data from server...');
+        
+        -- Request main menu data (triggers 0x063 subtype 5)
+        local packet1 = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        AshitaCore:GetPacketManager():AddOutgoingPacket(0x61, packet1);
+        printMsg('  Sent packet 0x61 (main menu request)');
+        
+        -- Request job point categories (triggers 0x08D)
+        local packet2 = { 0x00, 0x00, 0x00, 0x00 };
+        AshitaCore:GetPacketManager():AddOutgoingPacket(0xC0, packet2);
+        printMsg('  Sent packet 0xC0 (job point menu request)');
+        
+        printMsg('Check chat for packet interception messages.');
     elseif cmd == 'dumpjobs' then
         -- Try to find and dump the job points data structure in memory
         -- The data is structured as: capacityPoints(u16), currentJp(u16), totalJpSpent(u16) per job
         -- Total: 6 bytes per job, 23 jobs (0-22)
         printMsg('Searching for job points data structure in memory...');
-        
+
         -- Job names for display
         local jobNames = {
-            [0] = 'NON', [1] = 'WAR', [2] = 'MNK', [3] = 'WHM', [4] = 'BLM', [5] = 'RDM',
-            [6] = 'THF', [7] = 'PLD', [8] = 'DRK', [9] = 'BST', [10] = 'BRD', [11] = 'RNG',
-            [12] = 'SAM', [13] = 'NIN', [14] = 'DRG', [15] = 'SMN', [16] = 'BLU', [17] = 'COR',
-            [18] = 'PUP', [19] = 'DNC', [20] = 'SCH', [21] = 'GEO', [22] = 'RUN',
+            [0] = 'NON',
+            [1] = 'WAR',
+            [2] = 'MNK',
+            [3] = 'WHM',
+            [4] = 'BLM',
+            [5] = 'RDM',
+            [6] = 'THF',
+            [7] = 'PLD',
+            [8] = 'DRK',
+            [9] = 'BST',
+            [10] = 'BRD',
+            [11] = 'RNG',
+            [12] = 'SAM',
+            [13] = 'NIN',
+            [14] = 'DRG',
+            [15] = 'SMN',
+            [16] = 'BLU',
+            [17] = 'COR',
+            [18] = 'PUP',
+            [19] = 'DNC',
+            [20] = 'SCH',
+            [21] = 'GEO',
+            [22] = 'RUN',
         };
-        
+
         -- Try to find jobpoints data by searching for the pattern sent by server
         -- Look for a pointer to the job points array
         -- The data comes from packet 0x063 subtype JobPoints
-        
+
         -- Search for common patterns that might be near job point data
         local searchPatterns = {
             '00000000000000000000000000', -- Array of zeros (uninitialized jobs)
         };
-        
+
         -- Alternative: Try to find the data structure by looking for specific patterns
         -- in the FFXiMain.dll data section
         printMsg('Job Point Entry Structure: {capacityPoints(u16), currentJp(u16), totalJpSpent(u16)}');
         printMsg('SMN is job index 15 (0x0F)');
         printMsg('');
         printMsg('Use /ujp findjpdata to search for JP data pointer');
-        
     elseif cmd == 'findjpdata' then
         -- Try to find the job points data by searching for known patterns
         printMsg('Searching FFXiMain.dll for job points data references...');
-        
+
         -- Look for code that accesses the job points structure
         -- The client likely has code like: lea reg, [jobPointsArray + jobId*6]
         -- Or: mov reg, [jobPointsArrayPtr]
-        
+
         -- Search for patterns that reference the totalJpSpent offset (+4)
         local patterns = {
             { pattern = '6683??0600', name = 'cmp word [reg+6],0 (totalJpSpent check)' },
         };
-        
+
         printMsg('Addresses with totalJpSpent checks:');
         for _, p in ipairs(patterns) do
             local count = 0;
             local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
-            
+
             while addr ~= 0 and count < 30 do
                 -- Read context around this address to understand the code
                 local context = '';
@@ -612,12 +700,11 @@ ashita.events.register('command', 'command_cb', function(e)
                     context = context .. string.format('%02X ', ashita.memory.read_uint8(addr + i));
                 end
                 printMsg(string.format('  0x%08X: %s', addr, context));
-                
+
                 count = count + 1;
                 addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, count);
             end
         end
-        
     elseif cmd == 'watchmem' then
         -- Watch a memory region for changes (useful for finding what changes when selecting a job)
         if #args < 4 then
@@ -625,28 +712,28 @@ ashita.events.register('command', 'command_cb', function(e)
             printMsg('Example: /ujp watchmem 04470000 100');
             return;
         end
-        
+
         local startAddr = tonumber(args[3], 16);
         local length = tonumber(args[4]);
-        
+
         if not startAddr or not length then
             printError('Invalid address or length');
             return;
         end
-        
+
         printMsg(string.format('Reading %d bytes from 0x%08X:', length, startAddr));
-        
+
         local line = '';
         for i = 0, length - 1 do
             local byte = ashita.memory.read_uint8(startAddr + i);
             line = line .. string.format('%02X ', byte);
-            
+
             if (i + 1) % 16 == 0 then
                 printMsg(string.format('  +%03X: %s', i - 15, line));
                 line = '';
             end
         end
-        
+
         if #line > 0 then
             printMsg(string.format('  +%03X: %s', length - (#line / 3), line));
         end
