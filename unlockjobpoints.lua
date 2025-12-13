@@ -1,191 +1,165 @@
 --[[
-* Unlock Job Points Menu at Level 75
+* Addons - Copyright (c) 2025 Ashita Development Team
+* Contact: https://www.ashitaxi.com/
+* Contact: https://discord.gg/Ashita
 *
-* Uses pattern scanning to find and patch level checks.
-* Focus: Main Menu Access
+* This file is part of Ashita.
+*
+* Ashita is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* Ashita is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with Ashita.  If not, see <https://www.gnu.org/licenses/>.
 --]]
 
 addon.name    = 'unlockjobpoints';
 addon.author  = 'FFXI-Ashita';
-addon.version = '4.1.0';
-addon.desc    = 'Unlocks the Job Points menu at level 75';
+addon.version = '2.0.0';
+addon.desc    = 'Unlocks the Job Points menu at level 75 (for 75-era private servers).';
 addon.link    = 'https://github.com/kchang4/unlockjobpoints';
 
 require('common');
 local chat = require('chat');
 
--- Constants
-local TARGET_LEVEL = 75;   -- Level we want to enable JP menu at
-local ORIGINAL_LEVEL = 99; -- Original retail level requirement
-
---[[
-* Core Patterns for Main Menu Access
---]]
-local PATTERNS = {
-    -- 1. JP Menu Enable Check - The main gate for the menu
-    -- Pattern: CMP EAX, 50h (80); JB ...; CMP EAX, 99
-    {
-        pattern = '83F850720883F8??',
-        offset = 7,
-        name = 'JP Menu Enable Check',
-    },
-    -- 2. JP Menu Init Check - Initialization of the menu
-    -- Pattern: XOR CL,CL; CMP EAX, 99; MOV [ESI], ...
-    {
-        pattern = '32C983F8??C706',
-        offset = 4,
-        name = 'JP Menu Init Check',
-    },
-    -- 3. Per-Job Level Check - Enables individual jobs inside the menu
-    -- Pattern: MOV EAX,[ESP+0C]; CMP AL, 99; JNE ...
-    {
-        pattern = '8B44240C3C??753B',
-        offset = 5,
-        name = 'Per-Job Level Check',
-    }
+-- Patterns and their patch offsets
+local patterns = {
+    { name = 'MAIN MENU', pattern = '85C0740EF6000174??803D??????????73??8B4E086A086A05', offset = 15 },
+    { name = 'JOB LIST',  pattern = '50E8????????83C4043C??0F93C0C2040032C0C20400', offset = 10 },
 };
 
-local state = {
-    patches = {},
-    debug = false,
-};
-
--- Print helpers
-local function printMsg(msg) print(chat.header(addon.name):append(chat.message(msg))); end
-local function printError(msg) print(chat.header(addon.name):append(chat.error(msg))); end
-local function printSuccess(msg) print(chat.header(addon.name):append(chat.success(msg))); end
-
 --[[
-* Find ALL addresses matching a pattern
+* Helper functions
 --]]
-local function findAllPatternMatches(patternDef)
-    local results = {};
-    local seen = {};
-    local searchStart = 0;
-    local maxSearches = 100;
-    local searches = 0;
-
-    if not patternDef.pattern then return results; end
-
-    while searches < maxSearches do
-        local rawAddr = ashita.memory.find('FFXiMain.dll', searchStart, patternDef.pattern, 0, 0);
-        if rawAddr == 0 then break; end
-
-        local addr = rawAddr + patternDef.offset;
-        if not seen[addr] then
-            seen[addr] = true;
-            local byteVal = ashita.memory.read_uint8(addr);
-            -- Only match if it's 99 or 75
-            if byteVal == ORIGINAL_LEVEL or byteVal == TARGET_LEVEL then
-                table.insert(results, addr);
-            end
-        end
-        searchStart = rawAddr + 1;
-        searches = searches + 1;
-    end
-    return results;
+local function printMsg(msg)
+    print(chat.header(addon.name):append(chat.message(msg)));
 end
 
---[[
-* Apply patches
---]]
-local function applyPatches()
-    state.patches = {};
-    local applied = 0;
+local function printError(msg)
+    print(chat.header(addon.name):append(chat.error(msg)));
+end
 
-    for _, p in ipairs(PATTERNS) do
-        local addresses = findAllPatternMatches(p);
-        if #addresses == 0 then
-            printError('Pattern not found: ' .. p.name);
+local function printSuccess(msg)
+    print(chat.header(addon.name):append(chat.success(msg)));
+end
+
+local function findPattern(p)
+    local addr = ashita.memory.find('FFXiMain.dll', 0, p.pattern, 0, 0);
+    if addr ~= 0 then
+        return addr + p.offset;
+    end
+    return nil;
+end
+
+local function patchAll()
+    local count = 0;
+    for _, p in ipairs(patterns) do
+        local addr = findPattern(p);
+        if addr then
+            local current = ashita.memory.read_uint8(addr);
+            if current == 0x63 then
+                ashita.memory.write_uint8(addr, 0x4B);
+                printSuccess(string.format('%s: Patched (99->75)', p.name));
+                count = count + 1;
+            elseif current == 0x4B then
+                count = count + 1;
+            end
         else
-            for _, addr in ipairs(addresses) do
-                local currentByte = ashita.memory.read_uint8(addr);
-                if currentByte == ORIGINAL_LEVEL then
-                    table.insert(state.patches, { addr = addr, backup = currentByte, name = p.name });
-                    ashita.memory.write_uint8(addr, TARGET_LEVEL);
-                    applied = applied + 1;
-                elseif currentByte == TARGET_LEVEL then
-                    table.insert(state.patches, { addr = addr, backup = ORIGINAL_LEVEL, name = p.name });
-                end
+            printError(p.name .. ': Pattern not found');
+        end
+    end
+    return count;
+end
+
+local function restoreAll()
+    for _, p in ipairs(patterns) do
+        local addr = findPattern(p);
+        if addr then
+            local current = ashita.memory.read_uint8(addr);
+            if current == 0x4B then
+                ashita.memory.write_uint8(addr, 0x63);
             end
         end
     end
-    return applied;
 end
 
---[[
-* Restore patches
---]]
-local function restorePatches()
-    for _, p in ipairs(state.patches) do
-        ashita.memory.write_uint8(p.addr, p.backup);
+local function toggle(name)
+    for _, p in ipairs(patterns) do
+        if p.name == name then
+            local addr = findPattern(p);
+            if addr then
+                local current = ashita.memory.read_uint8(addr);
+                if current == 0x63 then
+                    ashita.memory.write_uint8(addr, 0x4B);
+                    printSuccess(name .. ': ON (75)');
+                elseif current == 0x4B then
+                    ashita.memory.write_uint8(addr, 0x63);
+                    printMsg(name .. ': OFF (99)');
+                end
+            else
+                printError(name .. ': Pattern not found');
+            end
+            return;
+        end
     end
-    state.patches = {};
-end
-
---[[
-* Read bytes helper
---]]
-local function readBytesAround(addr, before, after)
-    local bytes = {};
-    for i = -before, after do
-        table.insert(bytes, string.format('%02X', ashita.memory.read_uint8(addr + i)));
-    end
-    return table.concat(bytes, '');
 end
 
 --[[
 * Events
 --]]
 ashita.events.register('load', 'load_cb', function()
-    printMsg('v' .. addon.version .. ' loaded. Scanning for Main Menu patterns...');
-    local applied = applyPatches();
-    if applied > 0 then
-        printSuccess(string.format('Patched %d checks. Try opening the menu!', applied));
-    else
-        printMsg('No new patches applied (already patched or not found).');
+    local count = patchAll();
+    if count > 0 then
+        printSuccess(string.format('Applied %d patch(es). Job Points unlocked at level 75.', count));
     end
 end);
 
 ashita.events.register('unload', 'unload_cb', function()
-    restorePatches();
+    restoreAll();
 end);
 
 ashita.events.register('command', 'command_cb', function(e)
     local args = e.command:args();
-    if #args == 0 or args[1]:lower() ~= '/ujp' then return; end
-    e.blocked = true;
-    local cmd = (#args > 1) and args[2]:lower() or 'help';
-
-    if cmd == 'status' then
-        printMsg('Patch Status:');
-        for i, p in ipairs(state.patches) do
-            printMsg(string.format('  %d. %s (0x%08X): PATCHED', i, p.name, p.addr));
-        end
-    elseif cmd == 'scanall' then
-        printMsg('Scanning for ALL level 99 comparisons...');
-        local patterns = {
-            { sig = '3C63', name = 'CMP AL, 99' },
-            { sig = '83F863', name = 'CMP EAX, 99' },
-            { sig = '807E??63', name = 'CMP [ESI+?], 99' },
-            { sig = '83??63', name = 'CMP reg, 99' },
-            { sig = '80??63', name = 'CMP byte, 99' },
-        };
-        local found = {};
-        for _, pat in ipairs(patterns) do
-            local addr = 0;
-            repeat
-                addr = ashita.memory.find('FFXiMain.dll', addr + 1, pat.sig, 0, 0);
-                if addr ~= 0 then
-                    local ctx = readBytesAround(addr, 4, 4);
-                    printMsg(string.format('  Found 0x%08X: %s [%s]', addr, ctx, pat.name));
-                end
-            until addr == 0;
-        end
-    elseif cmd == 'bytes' and args[3] then
-        local addr = tonumber(args[3]);
-        if addr then
-            printMsg(string.format('Bytes at 0x%08X: %s', addr, readBytesAround(addr, 8, 8)));
-        end
+    if #args == 0 or not args[1]:ieq('/ujp') then
+        return;
     end
+    
+    e.blocked = true;
+    
+    if #args == 1 or args[2]:ieq('help') then
+        printMsg('Commands: /ujp status | menu | joblist');
+        return;
+    end
+    
+    if args[2]:ieq('status') then
+        for _, p in ipairs(patterns) do
+            local addr = findPattern(p);
+            if addr then
+                local current = ashita.memory.read_uint8(addr);
+                local status = (current == 0x4B) and 'ON (75)' or 'OFF (99)';
+                printMsg(string.format('%s: %s', p.name, status));
+            else
+                printError(p.name .. ': Pattern not found');
+            end
+        end
+        return;
+    end
+    
+    if args[2]:ieq('menu') then
+        toggle('MAIN MENU');
+        return;
+    end
+    
+    if args[2]:ieq('joblist') then
+        toggle('JOB LIST');
+        return;
+    end
+    
+    printError('Unknown command. Use /ujp help');
 end);
