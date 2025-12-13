@@ -1,182 +1,191 @@
 --[[
 * Unlock Job Points Menu at Level 75
 *
-* Patches two specific addresses to enable the Job Points menu at level 75:
-*   1. 0x046D84F7 - Job Points Menu Main Check (enables menu access)
-*   2. 0x046D9BA6 - Per-Job Level Check (enables individual jobs in menu)
+* Uses pattern scanning to find and patch level checks.
+* Focus: Main Menu Access
 --]]
 
 addon.name    = 'unlockjobpoints';
 addon.author  = 'FFXI-Ashita';
-addon.version = '3.0.0';
+addon.version = '4.1.0';
 addon.desc    = 'Unlocks the Job Points menu at level 75';
 addon.link    = 'https://github.com/kchang4/unlockjobpoints';
 
 require('common');
 local chat = require('chat');
-local ffi = require('ffi');
 
 -- Constants
-local TARGET_LEVEL = 0x4B;   -- 75 in hex
-local ORIGINAL_LEVEL = 0x63; -- 99 in hex
+local TARGET_LEVEL = 75;   -- Level we want to enable JP menu at
+local ORIGINAL_LEVEL = 99; -- Original retail level requirement
 
--- The two addresses that unlock Job Points at level 75
--- These are the actual memory addresses (not RVAs)
-local PATCH_ADDRESSES = {
-    { addr = 0x046D84F7, name = 'JP Menu Main Check' },
-    { addr = 0x046D9BA6, name = 'Per-Job Level Check' },
+--[[
+* Core Patterns for Main Menu Access
+--]]
+local PATTERNS = {
+    -- 1. JP Menu Enable Check - The main gate for the menu
+    -- Pattern: CMP EAX, 50h (80); JB ...; CMP EAX, 99
+    {
+        pattern = '83F850720883F8??',
+        offset = 7,
+        name = 'JP Menu Enable Check',
+    },
+    -- 2. JP Menu Init Check - Initialization of the menu
+    -- Pattern: XOR CL,CL; CMP EAX, 99; MOV [ESI], ...
+    {
+        pattern = '32C983F8??C706',
+        offset = 4,
+        name = 'JP Menu Init Check',
+    },
+    -- 3. Per-Job Level Check - Enables individual jobs inside the menu
+    -- Pattern: MOV EAX,[ESP+0C]; CMP AL, 99; JNE ...
+    {
+        pattern = '8B44240C3C??753B',
+        offset = 5,
+        name = 'Per-Job Level Check',
+    }
 };
 
--- State
 local state = {
-    patches = {}, -- {addr, backup, name}
+    patches = {},
     debug = false,
 };
 
+-- Print helpers
+local function printMsg(msg) print(chat.header(addon.name):append(chat.message(msg))); end
+local function printError(msg) print(chat.header(addon.name):append(chat.error(msg))); end
+local function printSuccess(msg) print(chat.header(addon.name):append(chat.success(msg))); end
+
 --[[
-* Print helpers
+* Find ALL addresses matching a pattern
 --]]
-local function printMsg(msg)
-    print(chat.header(addon.name):append(chat.message(msg)));
-end
+local function findAllPatternMatches(patternDef)
+    local results = {};
+    local seen = {};
+    local searchStart = 0;
+    local maxSearches = 100;
+    local searches = 0;
 
-local function printError(msg)
-    print(chat.header(addon.name):append(chat.error(msg)));
-end
+    if not patternDef.pattern then return results; end
 
-local function printSuccess(msg)
-    print(chat.header(addon.name):append(chat.success(msg)));
+    while searches < maxSearches do
+        local rawAddr = ashita.memory.find('FFXiMain.dll', searchStart, patternDef.pattern, 0, 0);
+        if rawAddr == 0 then break; end
+
+        local addr = rawAddr + patternDef.offset;
+        if not seen[addr] then
+            seen[addr] = true;
+            local byteVal = ashita.memory.read_uint8(addr);
+            -- Only match if it's 99 or 75
+            if byteVal == ORIGINAL_LEVEL or byteVal == TARGET_LEVEL then
+                table.insert(results, addr);
+            end
+        end
+        searchStart = rawAddr + 1;
+        searches = searches + 1;
+    end
+    return results;
 end
 
 --[[
-* Apply patches to enable JP menu at level 75
+* Apply patches
 --]]
 local function applyPatches()
     state.patches = {};
     local applied = 0;
 
-    for _, p in ipairs(PATCH_ADDRESSES) do
-        local currentByte = ashita.memory.read_uint8(p.addr);
-
-        if currentByte == ORIGINAL_LEVEL then
-            -- Store backup and patch
-            table.insert(state.patches, {
-                addr = p.addr,
-                backup = currentByte,
-                name = p.name
-            });
-            ashita.memory.write_uint8(p.addr, TARGET_LEVEL);
-            applied = applied + 1;
-            if state.debug then
-                printMsg(string.format('  Patched %s (0x%08X): 0x63 -> 0x4B', p.name, p.addr));
-            end
-        elseif currentByte == TARGET_LEVEL then
-            -- Already patched, just track it
-            table.insert(state.patches, {
-                addr = p.addr,
-                backup = ORIGINAL_LEVEL,
-                name = p.name
-            });
-            if state.debug then
-                printMsg(string.format('  %s (0x%08X): already patched', p.name, p.addr));
-            end
+    for _, p in ipairs(PATTERNS) do
+        local addresses = findAllPatternMatches(p);
+        if #addresses == 0 then
+            printError('Pattern not found: ' .. p.name);
         else
-            printError(string.format('  %s (0x%08X): unexpected value 0x%02X', p.name, p.addr, currentByte));
+            for _, addr in ipairs(addresses) do
+                local currentByte = ashita.memory.read_uint8(addr);
+                if currentByte == ORIGINAL_LEVEL then
+                    table.insert(state.patches, { addr = addr, backup = currentByte, name = p.name });
+                    ashita.memory.write_uint8(addr, TARGET_LEVEL);
+                    applied = applied + 1;
+                elseif currentByte == TARGET_LEVEL then
+                    table.insert(state.patches, { addr = addr, backup = ORIGINAL_LEVEL, name = p.name });
+                end
+            end
         end
     end
-
     return applied;
 end
 
 --[[
-* Restore original bytes
+* Restore patches
 --]]
 local function restorePatches()
-    local restored = 0;
     for _, p in ipairs(state.patches) do
         ashita.memory.write_uint8(p.addr, p.backup);
-        restored = restored + 1;
     end
     state.patches = {};
-    return restored;
 end
 
 --[[
-* Event: load
+* Read bytes helper
+--]]
+local function readBytesAround(addr, before, after)
+    local bytes = {};
+    for i = -before, after do
+        table.insert(bytes, string.format('%02X', ashita.memory.read_uint8(addr + i)));
+    end
+    return table.concat(bytes, '');
+end
+
+--[[
+* Events
 --]]
 ashita.events.register('load', 'load_cb', function()
-    printMsg('v' .. addon.version .. ' loaded');
-
+    printMsg('v' .. addon.version .. ' loaded. Scanning for Main Menu patterns...');
     local applied = applyPatches();
     if applied > 0 then
-        printSuccess(string.format('Patched %d address(es). Job Points menu enabled at 75!', applied));
+        printSuccess(string.format('Patched %d checks. Try opening the menu!', applied));
     else
-        printMsg('Patches already applied or addresses not found.');
+        printMsg('No new patches applied (already patched or not found).');
     end
 end);
 
---[[
-* Event: unload
---]]
 ashita.events.register('unload', 'unload_cb', function()
     restorePatches();
-    printMsg('Patches restored. Addon unloaded.');
 end);
 
---[[
-* Event: command
---]]
 ashita.events.register('command', 'command_cb', function(e)
     local args = e.command:args();
-    if #args == 0 or args[1]:lower() ~= '/ujp' then
-        return;
-    end
+    if #args == 0 or args[1]:lower() ~= '/ujp' then return; end
     e.blocked = true;
-
     local cmd = (#args > 1) and args[2]:lower() or 'help';
 
-    if cmd == 'help' then
-        printMsg('Commands:');
-        printMsg('  /ujp status  - Show patch status');
-        printMsg('  /ujp patch   - Apply patches');
-        printMsg('  /ujp restore - Restore original bytes');
-        printMsg('  /ujp debug   - Toggle debug mode');
-    elseif cmd == 'status' then
-        printMsg(string.format('Patches tracked: %d', #state.patches));
+    if cmd == 'status' then
+        printMsg('Patch Status:');
         for i, p in ipairs(state.patches) do
-            local current = ashita.memory.read_uint8(p.addr);
-            local status = (current == TARGET_LEVEL) and 'PATCHED' or 'ORIGINAL';
-            printMsg(string.format('  %d. %s (0x%08X): %s', i, p.name, p.addr, status));
+            printMsg(string.format('  %d. %s (0x%08X): PATCHED', i, p.name, p.addr));
         end
-
-        -- Also show current state of target addresses
-        printMsg('Target addresses:');
-        for _, p in ipairs(PATCH_ADDRESSES) do
-            local current = ashita.memory.read_uint8(p.addr);
-            local status = (current == TARGET_LEVEL) and 'ENABLED (0x4B)' or
-                (current == ORIGINAL_LEVEL) and 'DISABLED (0x63)' or
-                string.format('UNKNOWN (0x%02X)', current);
-            printMsg(string.format('  %s: %s', p.name, status));
+    elseif cmd == 'scanall' then
+        printMsg('Scanning for ALL level 99 comparisons...');
+        local patterns = {
+            { sig = '3C63', name = 'CMP AL, 99' },
+            { sig = '83F863', name = 'CMP EAX, 99' },
+            { sig = '807E??63', name = 'CMP [ESI+?], 99' },
+            { sig = '83??63', name = 'CMP reg, 99' },
+            { sig = '80??63', name = 'CMP byte, 99' },
+        };
+        local found = {};
+        for _, pat in ipairs(patterns) do
+            local addr = 0;
+            repeat
+                addr = ashita.memory.find('FFXiMain.dll', addr + 1, pat.sig, 0, 0);
+                if addr ~= 0 then
+                    local ctx = readBytesAround(addr, 4, 4);
+                    printMsg(string.format('  Found 0x%08X: %s [%s]', addr, ctx, pat.name));
+                end
+            until addr == 0;
         end
-    elseif cmd == 'patch' then
-        local applied = applyPatches();
-        if applied > 0 then
-            printSuccess(string.format('Applied %d patch(es).', applied));
-        else
-            printMsg('Patches already applied.');
+    elseif cmd == 'bytes' and args[3] then
+        local addr = tonumber(args[3]);
+        if addr then
+            printMsg(string.format('Bytes at 0x%08X: %s', addr, readBytesAround(addr, 8, 8)));
         end
-    elseif cmd == 'restore' then
-        local restored = restorePatches();
-        printMsg(string.format('Restored %d patch(es).', restored));
-    elseif cmd == 'debug' then
-        state.debug = not state.debug;
-        printMsg(string.format('Debug mode: %s', state.debug and 'ON' or 'OFF'));
-    else
-        printError('Unknown command. Use /ujp help');
     end
-end);
-
--- Cleanup handler for crashes
-local gc = ffi.gc(ffi.cast('uint8_t*', 0), function()
-    restorePatches();
 end);
